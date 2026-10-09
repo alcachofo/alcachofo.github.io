@@ -23,5 +23,6 @@ A notes app that is one HTML file: no dependencies, no build step, no server. Op
 - Attachments under their own key, each bound to its id so files cannot be swapped in the repo
 - A brute-force guard: 3 seconds per attempt, and a 30-day lockout after 10 failures
 - The repo and the browser storage only ever hold ciphertext
+- It only ever syncs to a private repo: until you point it at yours it sends nothing, and it refuses any repo that is public
 
-The [README](https://github.com/Alc4chofo/encrypted-notes#readme) explains how to set it up with your own private repo.
+The [README](https://github.com/Alc4chofo/encrypted-notes#readme) explains how to set it up with your own private repo, and [How it works](https://github.com/Alc4chofo/encrypted-notes/blob/main/HOW-IT-WORKS.md) documents the threat model, the cryptography, the file formats and the sync protocol in detail.
