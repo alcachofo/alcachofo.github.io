@@ -1,0 +1,27 @@
+---
+title: Encrypted Notes
+description: Encrypted notes in a single HTML file. Everything is encrypted in the browser and syncs to your own private GitHub repo.
+github: https://github.com/Alc4chofo/encrypted-notes
+techstack: ["JavaScript", "Web Crypto"]
+selected: true
+dateCreated: '2026-08-07T00:00:00Z'
+---
+
+A notes app that is one HTML file: no dependencies, no build step, no server. Open it in a browser and everything is encrypted and decrypted right there, with a master password that never leaves the machine. Notes sync to a private GitHub repo of your own, which only ever stores ciphertext.
+
+## Features
+
+- Nested folders, drag and drop, rich text and tables, with undo that covers structural changes too
+- Notes made of real A4 pages that paginate as you type, with designs you can import and export
+- A built-in PDF writer: what you see on the pages is what you export, with no metadata, and censored text and images never reach the file
+- Attachments of any type up to 200 MB, with EXIF and GPS data stripped from images
+- A real merge on sync (a conflict becomes a copy, nothing gets overwritten), a 30-day trash, and weekly and monthly encrypted backups
+
+## Security
+
+- AES-256-GCM, with the key derived by PBKDF2-SHA256 at 1,200,000 iterations and a fresh IV on every save
+- Attachments under their own key, each bound to its id so files cannot be swapped in the repo
+- A brute-force guard: 3 seconds per attempt, and a 30-day lockout after 10 failures
+- The repo and the browser storage only ever hold ciphertext
+
+The [README](https://github.com/Alc4chofo/encrypted-notes#readme) explains how to set it up with your own private repo.
