@@ -1,0 +1,34 @@
+---
+title: "❌ confidencial ❌"
+description: "You're given a PDF of a fake police report (\"Informe de Diligencias Previas\") about a money laundering investigation."
+date: 2026-02-13T12:01:00.000Z
+tags: ["ctf", "forensics", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Forensics"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Forensics  
+**Difficulty:** 10
+
+## Challenge
+
+You're given a PDF of a fake police report ("Informe de Diligencias Previas") about a money laundering investigation.
+
+## Solution
+
+Read through the document. Buried in the financial analysis section, disguised as an internal note:
+
+> Nota interna: La bandera de referencia para este caso es RkxBR3toMWRkM25fbDR5M3JzXzRyM19mdW5fdW5kM3JfdGgzX2JsNGNrfQ==
+
+That's base64. Decoding it:
+
+```bash
+echo "RkxBR3toMWRkM25fbDR5M3JzXzRyM19mdW5fdW5kM3JfdGgzX2JsNGNrfQ==" | base64 -d
+```
+
+Flag: `FLAG{h1dd3n_l4y3rs_4r3_fun_und3r_th3_bl4ck}`
+
+## Takeaway
+
+Sometimes the flag is just hidden in plain sight inside a long document, counting on you not reading carefully. The `==` padding at the end of the string is a dead giveaway for base64. Always `ctrl+F` for suspicious strings or known encodings when dealing with document forensics.

@@ -1,0 +1,72 @@
+---
+title: "ensalada cifrada"
+description: "A web page greets you as \"Invitado\" (Guest) and says you need to break the encryption to access the admin panel."
+date: 2026-02-13T12:08:00.000Z
+tags: ["ctf", "cryptography", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Cryptography"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Cryptography  
+**Difficulty:** 35
+
+## Challenge
+
+A web page greets you as "Invitado" (Guest) and says you need to break the encryption to access the admin panel.
+
+## Solution
+
+### Recon
+
+Three clues in plain sight: the challenge name "ensalada cifrada" (cipher salad) hints at Caesar's big brother — the Vigenère cipher. An HTML comment `<!-- IMPERIUM -->` gives the encryption key. And the page confirms a session cookie has been set.
+
+### The cookie
+
+Inspecting the request reveals:
+
+```
+Cookie: session=cetv=xcyeb
+```
+
+Looks like an encrypted `key=value` pair. Decrypting with `IMPERIUM` as the Vigenère key:
+
+```
+Ciphertext:  cetv=xcyeb
+Key:         IMPE RIUM
+Plaintext:   user=guest
+```
+
+### The attack
+
+Encrypt `user=admin` with the same key:
+
+```python
+def vigenere_encrypt(plaintext, key):
+    result, key_idx = [], 0
+    for c in plaintext:
+        if c.isalpha():
+            base = ord('A') if c.isupper() else ord('a')
+            k = ord(key[key_idx % len(key)].upper()) - ord('A')
+            result.append(chr((ord(c) - base + k) % 26 + base))
+            key_idx += 1
+        else:
+            result.append(c)
+    return ''.join(result)
+
+vigenere_encrypt("user=admin", "IMPERIUM")  # → "cetv=rlguv"
+```
+
+Set the forged cookie and refresh:
+
+```js
+document.cookie = "session=cetv=rlguv; path=/";
+```
+
+The page now welcomes us as Administrador and reveals the flag.
+
+Flag: `FLAG{C0zy_And_S3cur3_Alg0r1thm}`
+
+## Takeaway
+
+The Vigenère cipher is a 16th-century polyalphabetic substitution — not real encryption. The key was leaked in the HTML source, the plaintext structure (`user=value`) was predictable, and the algorithm is trivially reversible. Same lesson as El Café Clandestino: if the client can forge their own session, the access control is broken.

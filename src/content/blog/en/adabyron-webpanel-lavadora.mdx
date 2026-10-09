@@ -1,0 +1,38 @@
+---
+title: "el webpanel de mi lavadora"
+description: "An admin login panel titled \"Inicio de Sesión Admin\" with username and password fields."
+date: 2026-02-13T12:12:00.000Z
+tags: ["ctf", "pentesting-web", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 60
+
+## Challenge
+
+An admin login panel titled "Inicio de Sesión Admin" with username and password fields.
+
+## Solution
+
+Nothing unusual in the source code, so I fired up Burp Suite and intercepted a login request. The body was straightforward:
+
+```
+username=e&password=e
+```
+
+Two raw input fields being sent directly — classic SQL injection setup. Tried the most basic SQLi payload in the username field:
+
+```
+admin'OR'1'='1
+```
+
+The server didn't sanitize the input, the query evaluated to true, and it logged me right in. The flag appeared on the success page.
+
+Flag: `FLAG{d453d926-45d2-4e40-b5d3-6e97a1417caf}`
+
+## Takeaway
+
+This is textbook SQL injection — user input is concatenated directly into a SQL query without any sanitization or parameterized queries. The login check probably looks something like `SELECT * FROM users WHERE username='INPUT' AND password='INPUT'`, and injecting `admin'OR'1'='1` turns the WHERE clause into something that's always true. Parameterized queries or prepared statements would prevent this entirely.

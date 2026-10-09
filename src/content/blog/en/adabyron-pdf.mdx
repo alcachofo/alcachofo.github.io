@@ -1,0 +1,48 @@
+---
+title: "¿PDF?"
+description: "You're given malicious_invoice.pdf — a suspiciously tiny PDF at only 961 bytes. Opening it shows a single page with \"INVOICE #9921 - SUSPICIOUS\" and nothing else."
+date: 2026-02-13T12:05:00.000Z
+tags: ["ctf", "forensics", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Forensics"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Forensics  
+**Difficulty:** 20
+
+## Challenge
+
+You're given `malicious_invoice.pdf` — a suspiciously tiny PDF at only 961 bytes. Opening it shows a single page with "INVOICE #9921 - SUSPICIOUS" and nothing else. The challenge name says it all: is this really just a PDF?
+
+## Solution
+
+### Examining the PDF structure
+
+Dumping the raw contents reveals that object 3 defines an `OpenAction` with embedded JavaScript:
+
+```
+<< /S /JavaScript /JS (app.alert(atob("VGhlIHJlYWw..."));) >>
+```
+
+Decoding the base64 payload gives the hint: "The real content is attached to the end of this file structure."
+
+### Finding the hidden ZIP
+
+Looking past the `%%EOF` marker, the bytes `50 4B 03 04` appear — that's the magic header for a ZIP archive. The file is a polyglot: PDF readers parse from the top and stop at `%%EOF`, while ZIP readers locate the central directory from the end of the file. Both formats coexist without conflicting.
+
+Carving everything from offset 683 onward and treating it as a ZIP reveals two files: `flag.txt` and `loader.js` (a placeholder simulating a malware payload).
+
+### Extracting the flag
+
+```python
+import zipfile
+with zipfile.ZipFile("malicious_invoice.pdf") as z:
+    print(z.read("flag.txt").decode())
+```
+
+Flag: `FLAG{P0lygl0t_F1l3s_Ar3_Tr1cky_Malw4r3}`
+
+## Takeaway
+
+Polyglot files are a real attack vector — a single file can satisfy multiple format parsers simultaneously. The embedded JavaScript `OpenAction` mirrors how actual malicious PDFs auto-execute code on open, and the hidden ZIP shows how malware gets smuggled past filters that only validate the top-level file type. Always check past `%%EOF` in PDFs and run `binwalk` or `file` to detect embedded archives.

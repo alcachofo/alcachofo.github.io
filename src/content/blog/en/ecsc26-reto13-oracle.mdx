@@ -1,0 +1,173 @@
+---
+title: "Reto13_Oracle"
+description: "A product catalog called TechVault with a search box, and a footer that quietly tells you what is actually being tested: \"Powered by ShieldGuard Enterprise API.\""
+date: 2026-08-04T12:04:00.000Z
+tags: ["ctf", "pentesting-web", "ecsc26"]
+ctf: "ECSC 2026 Spanish Qualifier (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** ECSC 2026 Spanish Qualifier (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 500  
+
+## Challenge
+
+A product catalog called TechVault with a search box, and a footer that quietly tells you what is
+actually being tested:
+
+> Powered by ShieldGuard Enterprise API
+
+No source code, so black box against a WAF sitting in front of an unknown database.
+
+## Solution
+
+### Recon and the cost of a block
+
+I wrote a single probe script instead of poking the site one request at a time: dump `/products`,
+list every form, input and link, fire a battery of payloads, and try the usual side paths. The
+search box on `/products` is a front end for `/search?query=`, which answers with JSON rather than
+HTML. That is the real endpoint.
+
+The next question was the expensive one, so I answered it before building anything: what does a
+blocked payload cost? If one violation locks the IP out for a minute, every blind-injection plan is
+dead on arrival and I need a clean bypass instead.
+
+A violation does earn a ban, but only about three seconds. More importantly the two failure bodies
+are different:
+
+```text
+block:  Peticion bloqueada por la politica de seguridad global
+ban:    Has sido baneado temporalmente
+```
+
+That distinction ended up being the most useful thing I found all challenge. It means I can tell
+"this payload is filtered" apart from "we are still serving the ban from the last one", instead of
+guessing. Every probe in the filter-mapping script ran through this classifier:
+
+```python
+def classify(status, body):
+    if status == 200:
+        return "OK"
+    if "baneado" in body:
+        return "BAN"
+    if "bloqueada" in body:
+        return "BLOCK"
+    return str(status)
+
+
+def test(path, data=None, extra=None, tries=4):
+    """Waits out bans so BLOCK is never confused with BAN."""
+    for _ in range(tries):
+        st, body = raw(path, data=data, extra=extra)
+        kind = classify(st, body)
+        if kind == "BAN":
+            time.sleep(BAN_WAIT)
+            continue
+        if kind == "BLOCK":
+            time.sleep(BAN_WAIT)  # pay off the ban we just earned
+        else:
+            pause()
+        return kind, body
+    return "BAN", ""
+```
+
+### The bypass
+
+With a reliable verdict per payload, the first thing that script did was run the bypass vectors as
+one pass, paced and with browser headers and a `Referer` from the site so it looked like somebody
+using a search box rather than a scanner. Plain quote, `%27`, double-encoded `%2527`,
+triple-encoded, HTTP parameter pollution in both orders, `query[]`, `QUERY=` and `Query=`, a space
+before and after the parameter name, the fullwidth `＇` and modifier `ʼ` homoglyphs, overlong UTF-8
+`%c0%a7`, null-byte and newline prefixes, plus POST as form data and as JSON.
+
+The one that mattered was `%2527`. All the classifier could tell me at that moment was that
+ShieldGuard had not rejected it, which is a weaker signal than it sounds like, but it was the
+opening, and everything I built on top of it confirmed the reading: the quote was reaching SQLite.
+
+That is the whole vulnerability. The gateway percent-decodes the value **once** and inspects the
+result, while the application decodes it a **second** time before building the SQL. So if I encode
+every byte of the payload and then encode the resulting `%` signs, the WAF is looking at a string
+made of nothing but hex digits and percent signs, and there is no keyword left in it to match.
+SQLite still receives the real thing.
+
+```python
+def double_encode(s):
+    """Percent-encode every byte, then percent-encode the result's '%' signs."""
+    inner = "".join("%%%02X" % b for b in s.encode())
+    return urllib.parse.quote(inner, safe="")
+```
+
+The three views of the same request:
+
+```text
+app sees   :  Quantum' UNION SELECT
+WAF sees   :  %51%75%61%6E%74%75%6D%27%20%55%4E%49%4F%4E%20%53%45%4C%45%43%54
+wire carries: %2551%2575%2561%256E%2574%2575%256D%2527...
+```
+
+Worth noting that I encode *every* byte, not just the dangerous ones. Encoding only the quotes and
+the keywords would leave recognizable fragments in the middle of what the gateway sees, and the
+whole point is to give it a string with no structure at all.
+
+### What the filter was actually catching
+
+The same script mapped the filter after the vector sweep. The fifteen keyword candidates went out
+bare, as the entire query value, while the twelve punctuation candidates were appended to a benign
+term instead (`Quantum'`, `Quantum--`, `Quantum/*` and so on), so that a block could only be blamed
+on the character itself rather than on the word carrying it. The blocked set turned out to be short
+and specific: `'`, `"`, `--`, `/*`, and
+the keywords `select`, `union`, `or`, `and`, `order` and `information_schema`. Everything else I
+tried came back allowed, including `%`, `;`, `(`, `=`, `-`, `#`, a literal space, and a good deal of
+SQL that matters: `where`, `from`, `sleep`, `substr`, `case`, `like`, `limit`, `version` and
+`sqlite_master`.
+
+Two things follow from that. The blocked keywords were sent bare, with no syntax around them at all,
+and they were still rejected, so ShieldGuard is matching words rather than parsing SQL. And with
+`/*` itself on the blocklist, `/**/` padding was never going to be the way through. It is a list of
+strings, and a list of strings is exactly what double encoding hides from.
+
+### The injection
+
+Past the filter it is an ordinary SQLite union injection, and the JSON response means no blind work
+and no brute force. Each of these went out double-encoded:
+
+| Payload | What it asked |
+|---|---|
+| `Quantum'` | does a bare quote reach SQLite |
+| `zzz' UNION SELECT 1,2--` | the column count, which every later payload is built around |
+| `zzz' UNION SELECT sqlite_version(),'ver'--` | the engine fingerprint |
+| `zzz' UNION SELECT name,sql FROM sqlite_master--` | every table name and its DDL |
+| `zzz' UNION SELECT group_concat(<col>, ' \| '),'<col>' FROM <table>--` | the flag |
+
+The last one is worth a word: `group_concat` pulls every row of a column into a single cell, so one
+request per column dumps the whole table rather than one row at a time. Against a WAF that bans you
+for three seconds per mistake, request count is the budget you are actually spending. The finished
+solve is four fixed requests and then one per column, walking the tables in descending order of how
+much their name and column names look like somewhere a flag would live, and stopping as soon as a
+returned value contains `flag{` or `ECSC2026`. The scoring only decides the order, so a table that
+scores badly still gets dumped if the ones above it come up empty. None of it is blind.
+
+Flag: `flag{ECSC2026_doubl3_url_encod1ng_sql1_bypass}`
+
+## Takeaway
+
+This is a parser differential, not a filtering problem. ShieldGuard blocked every piece of syntax
+the injection depended on, `'` and `union` and `select` and `--`, whenever I sent them in the clear.
+It just was not looking at the same string the application would eventually run. Any time two
+components decode the same input a different number of times, the one that decodes more is the one
+that decides what actually executes, and the other one is only guessing. The same class covers
+double-encoded path traversal, `%252e%252e%252f`, and every WAF bypass that starts with an extra
+`%25`.
+
+The correct implementation is to normalize once, canonically, at the edge, and reject anything that
+still decodes into something different afterwards. Decode to a fixed point, or refuse input that
+contains an encoded `%` at all, and make sure the gateway and the app agree on how many passes there
+are. That said, the real fix is one layer down: the query was built by string concatenation, and a
+parameterized statement would have made the entire filter irrelevant. A WAF in front of a
+concatenated query is a spell checker in front of an `eval()`.
+
+The other lesson is cheaper and reusable. Two failure states with two different response bodies
+handed me a free oracle: filtered versus rate limited, told apart without a timing experiment.
+Distinct error messages are a small leak on their own, but they turn blind poking into measurement,
+and measurement is what makes a bypass search finish in one pass instead of twenty.

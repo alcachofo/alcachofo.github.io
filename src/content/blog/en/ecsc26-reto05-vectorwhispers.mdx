@@ -1,0 +1,204 @@
+---
+title: "Reto05_VectorWhispers"
+description: "One file: video.avi. 256x128, 55 frames, 10 fps. The statement described a screen crossed by several oscillating beams, only one of which carried the intercepted beacon transmission."
+date: 2026-08-04T12:06:00.000Z
+tags: ["ctf", "misc", "ecsc26"]
+ctf: "ECSC 2026 Spanish Qualifier (INCIBE)"
+category: "Misc"
+---
+
+**CTF:** ECSC 2026 Spanish Qualifier (INCIBE)  
+**Category:** Misc  
+**Difficulty:** 900  
+
+## Challenge
+
+One file: `video.avi`. 256x128, 55 frames, 10 fps. The statement described a screen crossed by
+several oscillating beams, only one of which carried the intercepted beacon transmission.
+
+## Solution
+
+### What is actually on screen
+
+Watching it back tells you nothing. It is black with a scatter of white dots that reshuffles
+completely every frame. So I stopped watching and counted pixels instead:
+
+```text
+[*] 55 frames of (128, 256)
+
+=== pixel-value histogram over the whole video ===
+   value   0 : 1799436
+   value 252 : 2804
+   ... 2 distinct values, max 252
+```
+
+Two pixel values in the entire video, and 51 lit pixels in every frame but one. That rules
+out the whole blob-detection reflex straight away: there is no brightness gradient, no size
+difference, no color separation. Every lit pixel is byte-identical to every other one, so the
+signal cannot be distinguished by looking at any single pixel. It has to be distinguished by where
+it is.
+
+The 2804 is worth a second of attention, because 55 x 51 is 2805. Frame 23 is the one exception with
+50, so two of its points landed on the same pixel. Nothing in the frame says which two.
+
+Two more numbers set up the hypothesis. The frame is 256 wide, which is exactly the range of a
+byte, and there are 55 frames. One character per frame, carried in an x coordinate.
+
+### The tracker that did not work
+
+The obvious first move is that 50 of the 51 points are re-randomized noise and one is a beam that
+moves smoothly, so a greedy nearest-neighbor chain should follow it. I ran all 51 points of frame 0
+as starting seeds and scored each chain by its mean step:
+
+```text
+=== best chains by mean step ===
+  start  24: mean step  10.45  max  22.36  first pts [(161, 69), (164, 70), (151, 66), (159, 61)]
+  start   0: mean step  10.93  max  24.41
+  start  34: mean step  11.88  max  27.59
+
+  x as ascii : .......................................................
+```
+
+Not one printable character out of 55. The point density explains it. Measured on the video, the
+nearest point in the next frame is 13.3px away on average, and the beam, once I knew where it was,
+turns out to move 16.5px per frame and as much as 54.9px. So the true beam is usually not the
+closest point, and a single wrong hop drops the chain into the noise for good. The winning chain's
+10.45px mean step is not evidence of a track either: all 51 chains scored between 10.45px and
+15.07px, so the best one is just the luckiest random walk.
+
+That dead end is the useful part of this challenge, because it says exactly what the solution needs
+to be. Local continuity is not a strong enough discriminator at this noise density. The beam has to
+be found by a property that holds across the whole video and that uniform noise cannot imitate.
+
+### The crib
+
+The flag format was `flag{ECSC2026_...}`, so before writing another tracker I tested the encoding
+directly. If frame i carries `msg[i]` in a coordinate, then frame i must contain a point at that
+coordinate. That is a one-line check and it needs no tracking at all:
+
+```text
+=== does frame i contain a point with x == ord(crib[i]) ? ===
+  f 0 'f' (102): x-hits [(102, 64)]
+  f 1 'l' (108): x-hits [(108, 79)]
+  f 2 'a' ( 97): x-hits [(97, 50), (97, 90)]
+  f 3 'g' (103): x-hits [(103, 95)]
+  f 4 '{' (123): x-hits [(123, 93)]
+  f 5 'E' ( 69): x-hits [(69, 83)]
+  f 6 'C' ( 67): x-hits [(67, 26), (67, 68)]
+  f 7 'S' ( 83): x-hits [(83, 52)]
+  f 8 'C' ( 67): x-hits [(67, 39)]
+  f 9 '2' ( 50): x-hits [(50, 32)]
+  f10 '0' ( 48): x-hits [(48, 33)]
+  f11 '2' ( 50): x-hits [(50, 41)]
+  f12 '6' ( 54): x-hits [(54, 55)]
+```
+
+Thirteen out of thirteen on x. The same test against y produced a single hit across all thirteen
+frames, and that one was a coincidence. So x is the byte.
+
+The y column of those hits is where the challenge actually lives:
+
+```text
+64, 79, 90, 95, 93, 83, 68, 52, 39, 32, 33, 41, 55
+```
+
+It climbs, turns over near 95, falls to 32 and starts climbing again. That is a sine, that is the
+"oscillating beam" from the statement, and it is the global property the nearest-neighbor tracker
+had no way to use.
+
+### Fitting the oscillation
+
+Seed the y track from the crib, resolving the two ambiguous frames (2 and 6, which each had two
+x-hits) by picking the candidate closest to the local trend, then least-squares fit
+`y(t) = C + A·sin(wt) + B·cos(wt)` while sweeping the frequency:
+
+```python
+t = np.arange(len(seed_y), dtype=float)
+best = None
+for w in np.linspace(0.05, 1.5, 30000):
+    M = np.stack([np.ones_like(t), np.sin(w * t), np.cos(w * t)], 1)
+    coef, res, *_ = np.linalg.lstsq(M, seed_y, rcond=None)
+    err = np.sum((M @ coef - seed_y) ** 2)
+    if best is None or err < best[0]:
+        best = (err, w, coef)
+```
+
+```text
+[+] crib y-track: [64, 79, 90, 95, 93, 83, 68, 52, 39, 32, 33, 41, 55]
+[+] fit: w=0.50063 (period 12.55 frames)  C=63.5 A=32.0 B=0.0  sse=1.16
+```
+
+The model has four free parameters, not three: C, A and B come out of the least squares, and w is
+fitted as well by the 30000-point sweep. Four parameters against 13 points means a low error proves
+little on its own. What does is where the parameters landed. C = 63.5 is the vertical center of a
+128px frame, A = 32.0 is exactly a quarter of the height, and B = 0.0 means the beam starts at
+phase zero. Those are authored constants, and the whole 13-point track sits inside a summed squared
+error of 1.16.
+
+Extrapolating the curve to all 55 frames and taking the nearest point in each gets most of the way:
+
+```text
+[*] max |y - fit| over all frames: 1.15
+
+MESSAGE: flag{ECSC2026_vector_whi?pers_transmis?}on_in?erce(ned}
+```
+
+That 1.15 is the residual of the point the script picked, not of the beam, and in six frames it
+picked a noise pixel instead: 24, 38, 39, 45, 50 and 51, which are exactly the six corrupted
+characters. Scored against the real beam, the worst residual in the video is 1.32px, at frame 50.
+So the corrupted characters are not tracking failures, they are frames where a noise pixel happened
+to land closer to the curve than the beam did.
+
+### Resolving the collisions
+
+So instead of taking the single nearest point, I listed every candidate within 1.6px of the curve
+per frame, a band wide enough to hold the beam in all 55 frames, and looked at how constrained the
+reading was:
+
+```text
+[*] frames with a unique candidate: 32/55
+
+  f 0 y*= 63.56  x candidates [102, 108] -> ['f', 'l']
+  f36 y*= 39.99  x candidates [105, 112] -> ['i', 'p']
+  f51 y*= 76.01  x candidates [110, 116] -> ['n', 't']
+  f53 y*= 95.11  x candidates [100, 102] -> ['d', 'f']
+```
+
+32 of the 55 frames resolve uniquely with no help at all, and no frame carries more than five
+candidates, so the ambiguity is narrow everywhere it exists. The reading is 55 characters for 55
+frames, and the last check is that every frame contains the expected character sitting on the curve:
+
+```text
+[*] hypothesis (55 chars vs 55 frames)
+[+] every frame contains the expected character on the curve: True
+```
+
+Flag: `flag{ECSC2026_vector_whispers_transmission_intercepted}`
+
+## Takeaway
+
+The technical lesson is about how you separate signal from noise when the two are physically
+identical. Every lit pixel here had the same value, the same size and the same shape, so no test on
+a single pixel could work. Proximity did not work either: the beam moves further between frames than
+the distance to the nearest noise point, which is why the greedy chain never held. What separated
+them was that the beam obeyed a four-parameter model across all 55 frames while the noise obeyed
+nothing. Once I had a model I was not asking "which point is nearest" any more, I was asking "which
+point is consistent with the whole video", and that question the noise cannot answer. This is matched
+filtering in the shape of a puzzle: correlate against the expected structure rather than chase the
+strongest local return. Radar, GPS and DSSS all pull signals out from under the noise floor the same
+way.
+
+The known-plaintext crib deserves its own credit. I spent time building a tracker before testing
+whether I even knew what a "character" looked like in this encoding, when the flag prefix let me
+confirm the encoding, rule out y, and hand me the seed track for the fit, all from one loop with no
+tracker involved. When you know part of the answer, test the encoding hypothesis first and build the
+extraction second.
+
+On the defensive side this is an optical covert channel, and it is worth being clear about why it
+was recoverable. The designer randomized the cover but not the carrier. The 50 decoy points were
+re-drawn every frame while the beam followed one fixed, deterministic, low-frequency sinusoid for
+the entire transmission, so the carrier stood out as the only structured thing in the video. A real
+exfiltration channel built this way would randomize the carrier too, keying the trajectory from a
+shared secret so that the receiver knows where to look and an interceptor sees 51 indistinguishable
+random points. That is the difference between hiding data and encrypting it, and the same lesson
+applies to any covert channel: obscurity in the modulation is not confidentiality.

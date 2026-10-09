@@ -1,0 +1,221 @@
+---
+title: "Reto06_BrokenJournal"
+description: "A zip with three files: registry.hive (5120 bytes) and two transaction logs, registry.hive.log1 and registry.hive.log2 (2096 bytes each)."
+date: 2026-08-04T12:11:00.000Z
+tags: ["ctf", "misc", "ecsc26"]
+ctf: "ECSC 2026 Spanish Qualifier (INCIBE)"
+category: "Misc"
+---
+
+**CTF:** ECSC 2026 Spanish Qualifier (INCIBE)  
+**Category:** Misc  
+**Difficulty:** 1600  
+
+## Challenge
+
+A zip with three files: `registry.hive` (5120 bytes) and two transaction logs, `registry.hive.log1`
+and `registry.hive.log2` (2096 bytes each). The hive on disk parses fine and holds one key,
+`Rootkit`, carrying two values: `Config`, set to a benign looking placeholder, and `Key`, set to
+`ShadowRegistryKey`. Replaying the logs turned out to touch only the `Config` value and the two
+header sequence numbers, so the rest of that bin, `ShadowRegistryKey` included, is already sitting on
+disk byte for byte. What the logs hold is the history of that one value, and no off-the-shelf
+registry tool will replay that journal for you.
+
+## Solution
+
+The premise is real forensics. When Windows writes to a registry hive it stages the change in a
+`.LOG1`/`.LOG2` transaction log first, and if the machine dies before the flush the hive on disk is
+stale. The recovery procedure is well understood: read the log entries, apply each one to the offset
+it names, in sequence order. `regipy` does this for you.
+
+None of that works here, and the reason is the whole challenge. There are three separate layers of
+sabotage stacked on top of each other, and each one has to come off before the next is even visible.
+
+### The log format is not the Windows one
+
+The hive itself is genuine enough:
+
+```text
+00000000: 7265 6766 0100 0000 0100 0000 0000 0000  regf............
+00000020: 2000 0000 0004 0000 0000 0000 0000 0000   ...............
+```
+
+`regf` magic, primary and secondary sequence both 1, root cell at 0x20, bins data size 0x400. One
+single 1024 byte hbin at file offset 0x1000. Small, but structurally sane. Worth noting that the two
+sequence numbers being equal is the *clean* marker, not the dirty one, so despite the framing this
+hive's header never advertises a pending replay. The logs are the only reason to look further.
+
+The logs are not. A real `.LOG1` opens with a 512 byte `regf` base block and only carries log entries
+after it. These start at byte zero with something else entirely:
+
+```text
+00000000: 4876 4c65 0100 0000 0100 0000 1de8 4d6f  HvLe..........Mo
+00000010: 0010 0000 0004 0000 5b51 5a5d 3333 3333  ........[QZ]3333
+```
+
+`HvLe` is one case bit away from Windows' own `HvLE` log entry signature, which is a nice piece of
+misdirection. It looks familiar enough that you assume you are holding a real log, but with no base
+block in front of it every parser bails on the first read. So the format has to be recovered by hand.
+It is 24 bytes and it is obvious once you line up the two files:
+
+| Offset | Field | Value seen |
+|---|---|---|
+| 0x00 | magic | `HvLe` |
+| 0x04 | sequence number | 1 to 4 |
+| 0x08 | unknown / flags | always 1 |
+| 0x0c | hash or timestamp | varies per entry |
+| 0x10 | target offset in the hive | `0x1000` |
+| 0x14 | payload size | `0x400` |
+
+Then `size` bytes of payload. Every entry is a full replacement of the one hbin, which makes the
+replay trivial once you can read the payloads.
+
+### Each payload has its own XOR key, and the sequences are interleaved
+
+The payload in that hexdump is a wall of `0x33` bytes. That is a giveaway: a run of `0x33` where you
+expect a run of nulls means single byte XOR with key `0x33`. And you never have to guess, because
+you know the plaintext starts with the `hbin` magic, so the key is just `payload[0] ^ ord('h')`.
+
+```python
+def entries(path):
+    d = path.read_bytes()
+    out, off = [], 0
+    while off + 24 <= len(d) and d[off:off + 4] == b"HvLe":
+        seq, unk, stamp, tgt, size = struct.unpack_from("<IIIII", d, off + 4)
+        pay = d[off + 24: off + 24 + size]
+        key = pay[0] ^ ord("h")
+        out.append((seq, tgt, key, bytes(b ^ key for b in pay)))
+        off += 24 + size
+    return out
+```
+
+Two entries per file, four total, and this is where the second piece of sabotage shows up. Each entry
+uses a *different* key, and the sequence numbers are interleaved across the two files rather than
+sitting in order inside one:
+
+| File | Offset | Seq | Stamp | XOR key |
+|---|---|---|---|---|
+| `registry.hive.log1` | 0 | 1 | `0x6f4de81d` | `0x33` |
+| `registry.hive.log2` | 0 | 2 | `0x36281587` | `0x44` |
+| `registry.hive.log1` | 1048 | 3 | `0x50b0561c` | `0x55` |
+| `registry.hive.log2` | 1048 | 4 | `0x2e764099` | `0x66` |
+
+Log1 holds 1 and 3, log2 holds 2 and 4, so reading the files back to back gives you 1, 3, 2, 4. That
+does not change the final hive, and it is worth being precise about why rather than assuming it does:
+every entry rewrites the entire bin, so only the last one applied survives, and seq 4 is last in file
+order as well as in sorted order. I replayed both orders and the two 5120 byte results are byte
+identical. Sorting on the sequence field buys you the *history*, not the end state, and the history is
+where this challenge keeps the flag.
+
+### Replay, and the decoy on top
+
+Applying all four in sequence order to offset 0x1000 and fixing the header sequence numbers gives a
+readable hive. My solve script then tried to walk the cell structures, printed nothing, and I wrote
+that off as the bin being a hand-built stub with no real records in it. That was wrong, and it was my
+bug rather than the challenge's.
+
+The walk started at bin offset 0x20, which is where a real hbin puts its first cell and is also what
+this hive's base block gives as the root cell offset. But in this hive that offset points at the cell
+*body*: the `nk` signature is at 0x20 and the cell size field sits four bytes earlier, at 0x1c.
+Reading a size where the signature is yields 0x6b6e, the walk steps far past the end of the bin, and
+the loop exits after one iteration having matched nothing.
+
+Walking from 0x1c instead, the chain is complete: every cell size lands exactly on the next cell,
+with no gaps and no overshoot.
+
+| Cell | Size | What it is |
+|---|---|---|
+| 0x1c | -96 | `nk`, key name `Rootkit`, 2 values, value list at 0x80 |
+| 0x7c | -128 | value list: count 2, then 0x100 and 0x200 |
+| 0xfc | -132 | `vk` named `Config`, type 3, data offset 0x180 |
+| 0x180 | -124 | data cell, contents at 0x184 |
+| 0x1fc | -132 | `vk` named `Key`, type 1 (`REG_SZ`), data offset 0x280 |
+| 0x280 | -288 | data cell, contents at 0x284: `ShadowRegistryKey` |
+| 0x3a0 | 0 | end of the chain, 96 zero bytes to the end of the bin |
+
+That structure is worth more than the `strings` dump I actually used, because it hands over both of
+the things the rest of the solve needed: the `Config` data sits at 0x184, which is the region that
+differs between entries, and the `Key` value's data is the string that turns out to be the inner XOR
+key. I reached both the slow way instead. `strings` over the recovered bin gets to the same place:
+
+```text
+hbin
+Rootkit
+Config
+malicious_garbage_payload_overwritten_by_accident
+ShadowRegistryKey
+```
+
+That is the trap, and it is the one that actually costs people the challenge. The last write
+wins in a journal replay, so the "correct" recovery leaves you holding
+`malicious_garbage_payload_overwritten_by_accident`. Dumping the same value region out of all four
+entries makes the story clear:
+
+| Seq | Value at bin offset 0x184 |
+|---|---|
+| 1 | `decoy_config_update_transaction_1_dummy_data` |
+| 2 | `another_decoy_config_update_transaction_2` |
+| 3 | `5....2.6$[CFD&9............,...%..0....( .....` |
+| 4 | `malicious_garbage_payload_overwritten_by_accident` |
+
+Seq 1 and 2 are decoys, seq 4 is the attacker stomping the record, and seq 3 is the only entry whose
+value does not decode. Everything else in that same entry (`hbin`, `Rootkit`, `Config`,
+`ShadowRegistryKey`) comes out perfectly readable under key `0x55`, so the garbling is not the entry
+key being wrong. That field carries a second layer of its own.
+
+### The second layer
+
+Single byte XOR over the seq 3 value, on both the decoded and the raw pre-key bytes, found nothing.
+Neither did a positional rolling key. Not a single byte cipher, then, so the next thing to try is a
+repeating key, and the key material was sitting in the same entry the whole time. `ShadowRegistryKey`
+is not the registry key name, which is `Rootkit`. It is the string data of the `REG_SZ` value named
+`Key`, the second of the two values under that key, and the cell walk above points straight at it.
+
+A crib check settles it in one line. XOR the ciphertext against the known flag prefix:
+
+```python
+ct = bytes.fromhex('3504000314321136245b4346442639001e0c0c08161b0e0d'
+                   '09080e2c000018251618301c080b01282000040605110000')
+bytes(c ^ k for c, k in zip(ct, b'flag{'))   # -> b'Shado'
+```
+
+Five characters of crib give five characters of key, and they are the start of a string already in
+front of me. Running the full repeating key over the region confirms it, and the tell is that the
+plaintext runs past the closing brace straight back into the key:
+
+```python
+key = b'ShadowRegistryKey'
+blob = decoded_seq3[0x184:0x184 + 64]     # the value region, 64 bytes
+bytes(c ^ key[i % len(key)] for i, c in enumerate(blob))
+# b'flag{ECSC2026_reg_dirty_log_transaction_recovery}eyShadowRegistr'
+```
+
+The tail is the best confirmation available. The flag is 49 bytes, the ciphertext after it is all
+zeros, and 49 mod 17 is 15, so those zeros decode to the key itself picked up at index 15: `ey`
+followed by `ShadowRegistr`. That is keystream leaking through zero padding, and it only lines up
+like that if both the key and its length are right.
+
+Flag: `flag{ECSC2026_reg_dirty_log_transaction_recovery}`
+
+## Takeaway
+
+The forensics lesson is that the journal is evidence in its own right, not just a means to an end.
+Standard tooling replays a transaction log to its final consistent state and throws the intermediate
+transactions away, and here the final state is the attacker's overwrite while the useful record is
+one revision back. If the question is what happened rather than what the value is now, you want every
+entry in the log, in order, with its sequence number attached. Anti-forensics that appends a garbage
+write is defeated by simply not discarding history.
+
+The lesson I actually paid for is narrower: when a structured parse returns nothing, suspect the
+parser before concluding the structure is not there. Mine was four bytes off and I believed it, then
+recovered the same two facts the long way: the value region by regexing a decoy string out of an
+earlier entry, and the inner key by eye from a `strings` dump. Dumping the raw bytes around the offset
+where the walk gave up would have cost one command and settled it.
+
+The other half is that obfuscation only buys time when the plaintext is unknown. Both XOR layers died
+to known plaintext. The entry keys fell out of the `hbin` magic, and the inner repeating key fell out
+of `flag{` plus a string sitting in the same record. XOR leaks its key wherever you can guess the
+message, which is why real integrity protection on a transaction log is a keyed MAC over each entry
+with a key that is not stored beside the data. What Windows ships is unkeyed checksums, which catch a
+torn write but not a deliberate one, because anyone who rewrites an entry can recompute them. They
+were never meant to stop someone rewriting the journal.

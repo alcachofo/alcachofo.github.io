@@ -1,0 +1,56 @@
+---
+title: "Hall of Echoes"
+description: "A Solidity smart contract on the Sepolia testnet. To get the flag, you need to register as a \"hero\" — which requires a score of at least 1000."
+date: 2026-02-13T12:24:00.000Z
+tags: ["ctf", "web3", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Web3"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Web3  
+**Difficulty:** 200
+
+## Challenge
+
+A Solidity smart contract on the Sepolia testnet. To get the flag, you need to register as a "hero" — which requires a score of at least 1000.
+
+## Contract Analysis
+
+```solidity
+function setModule(address _module) external {
+    if (msg.sender == owner) {
+        revert HallOfEchoesUnauthorized();
+    }
+    trustedModule = _module;
+}
+
+function train(bytes calldata data) external {
+    (bool ok, ) = trustedModule.delegatecall(data);
+    if (!ok) {
+        revert HallOfEchoesTrainFailed();
+    }
+}
+```
+
+Two critical vulnerabilities here:
+
+**1. Inverted access control on `setModule`.** The function reverts if `msg.sender == owner` — meaning anyone *except* the owner can change the trusted module. This is almost certainly a logic bug (should be `!=` instead of `==`).
+
+**2. Unrestricted `delegatecall` in `train`.** Once you control the trusted module, `delegatecall` executes your code in the context of `HallOfEchoes` — same storage, same `address(this)`. You have full control over the contract's state.
+
+## Solution
+
+**Step 1 — Deploy an attack contract.** Created a contract that, when called via `delegatecall`, writes 1000 to the `score` mapping for my address. Since `delegatecall` preserves the caller's storage layout, writing to the correct storage slot directly modifies `HallOfEchoes`'s state.
+
+**Step 2 — Swap the trusted module.** Called `setModule` with my attack contract's address. Since I'm not the owner, the inverted check lets me through.
+
+**Step 3 — Trigger the exploit.** Called `train` with calldata targeting my attack contract's function. The `delegatecall` executes my code in `HallOfEchoes`'s context, setting my score to 1000.
+
+**Step 4 — Register and claim.** Called `registerAsHero` — the score check passes, I'm added to the Hall of Heroes. Signed the required message to the server and got the flag.
+
+Flag: `flag{ZOa6rcwSASKbb4vdYLLBZvjCpyDKNrkM}`
+
+## Takeaway
+
+`delegatecall` is one of the most dangerous operations in Solidity — it runs external code with full access to the calling contract's storage. Combining it with a broken access control (`==` instead of `!=`) creates a one-two punch: anyone can swap in a malicious module and then execute arbitrary storage writes. This mirrors real-world exploits like proxy contract vulnerabilities, where an unprotected upgrade function lets attackers replace the implementation entirely.

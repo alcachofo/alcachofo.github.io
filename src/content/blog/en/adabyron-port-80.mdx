@@ -1,0 +1,38 @@
+---
+title: ":80"
+description: "The description lists every standard HTTP method: GET, HEAD, DELETE, CONNECT, POST, OPTIONS, TRACE, PUT, PATCH."
+date: 2026-02-13T12:14:00.000Z
+tags: ["ctf", "pentesting-web", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 100
+
+## Challenge
+
+The description lists every standard HTTP method: GET, HEAD, DELETE, CONNECT, POST, OPTIONS, TRACE, PUT, PATCH. Visiting the URL returns a "Status: Restricted" page saying "Your current request does not meet the necessary criteria for data transmission."
+
+## Solution
+
+The key phrase is "data transmission" — GET requests retrieve data, but they don't transmit it. The challenge is asking for a method that sends data to the server.
+
+```bash
+curl -X POST https://metodo.byronlabs.io/
+```
+
+The server responds with a success page:
+
+```
+Status: Authorized
+Resource access granted. Data retrieved successfully.
+FLAG{H34d3rs_C4n_B3_H1dd3n_T00}
+```
+
+Flag: `FLAG{H34d3rs_C4n_B3_H1dd3n_T00}`
+
+## Takeaway
+
+Web applications can behave differently depending on the HTTP method used. A resource that blocks GET might accept POST, PUT, or DELETE, potentially exposing unintended functionality. Penetration testers routinely check how endpoints respond to different methods — proper method filtering should be enforced server-side for every endpoint.

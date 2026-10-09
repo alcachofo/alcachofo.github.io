@@ -1,0 +1,45 @@
+---
+title: "Mucho texto"
+description: "The description itself tells you the flag format (FLAG{}) and hints that it'll be buried in a wall of text."
+date: 2026-02-13T12:03:00.000Z
+tags: ["ctf", "pentesting-web", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 15
+
+## Challenge
+
+> lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt FLAG\{...\} ut labore et dolore magna aliqua.
+
+The description itself tells you the flag format (`FLAG{}`) and hints that it'll be buried in a wall of text.
+
+## Solution
+
+The website presents a login form titled "ACCESO DENEGADO" with the subtitle "Sistema de logs confidenciales. Identifíquese." and a flashing message:
+
+> no nos importa la seguridad. usa tus credenciales por defecto
+
+They're literally telling you they don't care about security and to use default credentials. Tried `admin`/`admin` — worked on the first try.
+
+Logging in downloaded a `.zip` file containing a log file. Opening it revealed hundreds of lines of fake debug logs like:
+
+```
+2026-02-04 10:00:16 [DEBUG] Process 2334: E5s0o6wOVTcGCEDorMwHHDJRpXh8pwig1lxrlTxT1sVjWqoZ0m
+2026-02-04 10:00:17 [DEBUG] Process 6380: BXVm7lKGsknQ0FVeTJzOrhX63f07DjtDyRkZ8nxUlygoTypvvt
+```
+
+True to the challenge name — mucho texto. A quick `grep` for "FLAG" cut through the noise:
+
+```
+2026-02-04 10:00:57 [INFO] System check: FLAG{a7adf572-93d4-4125-9e50-6bcc08e6f71b}
+```
+
+Flag: `FLAG{a7adf572-93d4-4125-9e50-6bcc08e6f71b}`
+
+## Takeaway
+
+Two lessons here. First, default credentials are a real-world problem — the challenge even mocks it with "no nos importa la seguridad". Second, when you have a massive file full of noise, don't read it manually. Use `grep`, `ctrl+F`, or any text search tool to filter for what you know (in this case, the flag format from the description).

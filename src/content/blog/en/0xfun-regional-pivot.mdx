@@ -1,0 +1,61 @@
+---
+title: "Regional Pivot"
+description: "Track down the flag using the handle \"Massive-Equipment393\"."
+date: 2026-02-14T12:00:00.000Z
+tags: ["ctf", "osint", "0xfun"]
+ctf: "0xfun"
+category: "OSINT"
+---
+
+**CTF:** 0xfun  
+**Category:** OSINT  
+**Difficulty:** easy (100)
+
+## Challenge
+
+Track down the flag using the handle "Massive-Equipment393".
+
+## Solution
+
+### Recon
+
+Started with a Google dork: `site:reddit.com "Massive-Equipment393"`. This turned up a post in r/CTFlearn titled "Playlist" containing a Base58 string: `49Rak48kGp7nJoUq9ofCX`.
+
+The Reddit account linked to a Spotify profile with two playlists worth investigating: "My Playlists" and "My Playlists#3". Both had encrypted data hidden in them.
+
+### Decryption
+
+**Layer 1 — Base64 (My Playlists description):**
+
+The playlist description contained a Base64 string: `MHhmdW57c3AwdDFmeV9wbDR5bDFzdF8=`
+
+```
+0xfun{sp0t1fy_pl4yl1st_
+```
+**Layer 2 — Base58 (Reddit post):**
+
+Decoding the Base58 string `49Rak48kGp7nJoUq9ofCX` from the original Reddit post gave the next step:
+
+```
+pl4yl1st_3xt3nd
+```
+
+**Layer 3 — Acrostic cipher (My Playlists#3 tracklist):**
+
+Taking the first letter of every track name in "My Playlists#3" spelled out:
+
+```
+3xt3nd_M0R3_TR4X}
+```
+
+### Flag
+
+Combining all three layers (with the logical order, as it gives the previous part, like on the first part it says sp0t1fy_pl4yl1st_, and in the second pl4yl1st_3xt3nd, so logically we know it's the continuation):
+
+```
+0xfun{sp0t1fy_pl4yl1st_3xt3nd_M0R3_TR4X}
+```
+
+## Takeaway
+
+A nice multi-platform OSINT chain — Reddit leads to Spotify, and the flag is split across three different encoding layers hidden in playlist metadata and track names. The Google dork was the key entry point; without it, finding the Spotify connection would have been much harder. Always check profile links and descriptions, not just the main content.

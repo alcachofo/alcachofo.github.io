@@ -1,0 +1,176 @@
+---
+title: "Reto14_RubyLabyrinth"
+description: "A digital library called Alexandria, running on Ruby/Sinatra behind WEBrick, handed over as a screenshot of the challenge card plus an IP and port, with no source."
+date: 2026-08-04T12:09:00.000Z
+tags: ["ctf", "pentesting-web", "ecsc26"]
+ctf: "ECSC 2026 Spanish Qualifier (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** ECSC 2026 Spanish Qualifier (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 900  
+
+## Challenge
+
+A digital library called Alexandria, running on Ruby/Sinatra behind WEBrick, handed over as a
+screenshot of the challenge card plus an IP and port, with no source. The card carried a real
+description: it welcomed you to Alexandria's book lookup system, told you to explore the books and
+summaries on offer, and asked whether you would be capable of going deep into the entrails of the
+system to recover the flag. Ruby plus an invitation to dig into the internals reads as template
+injection or object deserialization before you send a single request, and that was the theory I
+opened with.
+
+## Solution
+
+### Recon
+
+The front page navigation gives the attack surface away before you touch anything. Two links stand
+out among the book pages:
+
+```text
+/view?file=public/about.txt
+/preferences
+```
+
+A file name sitting in a query parameter is the oldest tell there is. Rather than clicking around
+I wrote one probe script that answered every question I had in a single run: the catalog and its
+links, the `/preferences` form and any `Set-Cookie` it sets, a baseline `/view` so I knew what a
+*successful* read looks like, and then a traversal candidate list.
+
+```python
+CANDIDATES = [
+    "public/../app.rb", "../app.rb", "app.rb", "server.rb", "main.rb", "web.rb",
+    "public/../server.rb", "public/../main.rb",
+    "../../etc/passwd", "../../../etc/passwd", "../../../../etc/passwd",
+    "/etc/passwd", "....//....//etc/passwd",
+    "..%2f..%2f..%2fetc%2fpasswd",
+    "public/../../flag.txt", "flag.txt", "../flag.txt", "/flag.txt", "/flag",
+    "public/books/../../flag.txt",
+]
+```
+
+The order there is deliberate. Source first. With the server code in hand the rest of a web
+challenge is usually mechanical, and a Sinatra app is normally one `.rb` file sitting next to the
+`public/` directory the baseline read already pointed at. The sweep went out with browser headers
+and a random 0.4 to 0.9 second gap between requests so it did not read as a scanner.
+
+### One File.read and no sanitization
+
+Nine of the twenty candidates came back with content and eleven rendered an error beginning
+`Error reading file: No such file or directory` into the page, so a hit was trivially easy to spot.
+My probe truncated non-200 bodies at 110 characters, so that is the leading text rather than the
+whole line: line 235 below interpolates `e.message`, and Ruby's `Errno::ENOENT` message carries an
+`@ rb_sysopen - <path>` suffix after it.
+`public/../app.rb` and the plain `app.rb` both returned the Sinatra source while `../app.rb` did
+not, which places the process's working directory at the application root with `public/` beneath
+it. `../../etc/passwd` came back, and so did the plain absolute `/etc/passwd`. That last one
+settles the shape of the bug: this is not traversal escaping a document root, it is an
+unrestricted read, and no encoding trick was needed to get it.
+
+The source confirmed why. `/view` does not resolve, normalize or confine anything. These are the
+lines that matter, at their real line numbers in `app.rb`:
+
+```ruby
+218:get '/view' do
+219:  file_path = params[:file]
+226:    file_content = File.read(file_path)
+230:      <pre>#{ERB::Util.html_escape(file_content)}</pre>
+235:    content = "<p style='color: #f87171;'>Error reading file: #{ERB::Util.html_escape(e.message)}</p>"
+```
+
+No realpath, no base directory check, no allowlist. So the parameter is not a book identifier at
+all. It is a path argument handed straight to the process.
+
+For the flag itself, the first candidate in the sweep that returned it was `public/../../flag.txt`.
+`../flag.txt` and the absolute `/flag.txt` returned it too, while the bare relative `flag.txt` came
+back as the same read error, which puts the file one level above the application directory rather
+than in it. Pulling the whole contents out was then a matter of
+unwrapping the `<pre>` the template renders content into:
+
+```python
+def view(path):
+    req = urllib.request.Request(
+        BASE + "/view?file=" + urllib.parse.quote(path, safe=""), headers=HEADERS)
+    with urllib.request.urlopen(req, timeout=15) as r:
+        body = r.read().decode("utf-8", "replace")
+    m = re.search(r"(?s)<pre[^>]*>(.*?)</pre>", body)
+    return html.unescape(m.group(1)) if m else "(no <pre>) " + re.sub(r"<[^>]+>", " ", body)[:800]
+```
+
+A flag shaped string that falls out of a sweep is a candidate, not an answer, so I read the whole
+application source through the same primitive and grepped it for how the app handles flags. It does
+not handle them at all. There are five routes, `/`, `/catalog`, `/preferences`, `/view` and
+`/load_prefs`, and the word flag does not appear anywhere in the file. The confirmation came out
+in the negative, which was enough: nothing in the app generates or serves a flag, so what `/view`
+returned is a real file read off the disk rather than a string the application printed, and there
+is no second flag hiding behind the intended path.
+
+### The labyrinth I walked past
+
+Reading that source is also what showed how much of the challenge the file read skips, and the
+intended path is the more interesting half of this one.
+
+`/preferences` renders a form aimed at a companion endpoint, `/load_prefs`, and the input
+placeholder spells the format out before you have any source at all:
+
+```text
+Base64Data--HMACSignature
+```
+
+Behind it, the handler recomputes an HMAC over the base64 half using a secret pulled from
+`config.yml`, and then does two things that no application should ever do to attacker supplied
+bytes:
+
+```ruby
+240:get '/load_prefs' do
+241:  input = params[:data]
+254:    # Verify HMAC signature
+255:    expected_sig = OpenSSL::HMAC.hexdigest('sha1', SECRET, data_b64)
+262:    obj = Marshal.load(decoded)
+264:    res = eval(obj.to_s)
+```
+
+The designed chain was four stages: use the file read to reach the signing secret, forge a Marshal
+payload, sign it so the verification passes, and take RCE out of `Marshal.load` and the `eval`
+sitting behind it. I never ran it, and reaching the secret would not even have needed `config.yml`.
+The app writes that file itself when it is missing, from a default hardcoded in the source I had
+already dumped:
+
+```ruby
+14:# Load secret from config file
+17:  File.write(CONFIG_FILE, { 'session_secret' => 'd67e8125a18e9a18e9a18e9a18e9a18e' }.to_yaml)
+20:CONFIG = YAML.load_file(CONFIG_FILE)
+21:SECRET = CONFIG['session_secret']
+```
+
+What collapses the labyrinth is that stage one was never scoped. It was meant to leak one specific
+configuration file, and instead it reads every file the Ruby process can open, the one holding the
+answer included. Everything downstream of it, the signature check, the deserialization gadget, the
+eval, is defense that only means something if the file read is confined, and it is not.
+
+Flag: `flag{ECSC2026_ruby_m4rsh4l_L4byr1nth_9a8b}`
+
+## Takeaway
+
+Two lessons here, and the one that actually decided the challenge is the boring one.
+
+`File.read(params[:file])` is arbitrary file read, full stop. The fix is not to strip `../`,
+because blacklists lose to encoding and, as here, to absolute paths that never contain a dot
+segment at all. The correct implementation checks containment after resolution: expand the
+candidate with `File.realpath`, verify the result is a descendant of a fixed base directory, and
+refuse it otherwise. Better still, do not accept a path. Accept an identifier, look it up in a
+table of files you intended to serve, and let user input pick from a set instead of addressing the
+filesystem.
+
+The second lesson is the one worth carrying out of the room: an HMAC does not make `Marshal.load`
+safe. A signature proves a blob came from someone holding the key. It says nothing about what the
+blob asks for, and Ruby's `Marshal` is not a data format, it rebuilds arbitrary objects and invokes
+their hooks, so deserializing a signed payload is still executing code by design. Python's `pickle`
+and Java serialization are the same class of sink, and the `eval(obj.to_s)` here just makes it
+explicit. Serialize preferences as JSON, parse them into a known schema, and the signature becomes
+what it should have been all along: an integrity check on data, not the only thing between a user
+and a shell.
+
+The two lessons meet at the signing secret. A signing scheme is worth exactly as much as the
+weakest read primitive living in the same process.

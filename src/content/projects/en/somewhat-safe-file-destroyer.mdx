@@ -1,0 +1,25 @@
+---
+title: Somewhat Safe File Destroyer
+description: A Windows command-line tool that overwrites files before deleting them, so forensic recovery gets much harder.
+github: https://github.com/Alc4chofo/Somewhat-Safe-file-destroyer
+techstack: ["Python", "Windows"]
+selected: false
+dateCreated: '2026-03-19T00:00:00Z'
+---
+
+Deleting a file normally only removes its directory entry and leaves the data on disk. This tool does the job properly:
+
+1. **Overwrites** the contents with fixed byte patterns and random data
+2. **Truncates** the file to zero bytes, hiding its original size
+3. **Renames** it to random strings, scrubbing the original name from directory entries
+4. **Deletes** it
+
+## Security levels
+
+| Level | Passes | Use case |
+| --- | --- | --- |
+| Quick | 1 | Defeats basic undelete tools |
+| Standard | 3 | Defeats most software-based recovery |
+| Paranoid | 7 | DoD 5220.22-M inspired patterns, NTFS alternate data streams cleared |
+
+> On SSDs, wear-leveling means the OS cannot guarantee which flash cells get overwritten. There, full-disk encryption is the real answer: destroy the key and the data is gone.

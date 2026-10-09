@@ -1,0 +1,207 @@
+---
+title: "Reto12_TemporalGate"
+description: "A 14 KB stripped x86-64 PIE that prints Enter flag: and answers either SUCCESS: Flag is correct! or FAILED. The zip held nothing else: no service, no source, no symbols."
+date: 2026-08-04T12:13:00.000Z
+tags: ["ctf", "reversing", "ecsc26"]
+ctf: "ECSC 2026 Spanish Qualifier (INCIBE)"
+category: "Reversing"
+---
+
+**CTF:** ECSC 2026 Spanish Qualifier (INCIBE)  
+**Category:** Reversing  
+**Difficulty:** 1600  
+
+## Challenge
+
+A 14 KB stripped x86-64 PIE that prints `Enter flag: ` and answers either `SUCCESS: Flag is
+correct!` or `FAILED`. The zip held nothing else: no service, no source, no symbols.
+
+## Solution
+
+### The main loop
+
+`entry` hands `__libc_start_main` a function at `0x1011a0`, and Ghidra decompiled it cleanly.
+Stripped of the noise it is 33 rounds of the same thing:
+
+```c
+puVar5 = mmap((void *)0x0,0x1000,7,0x22,-1,0);   /* PROT_READ|WRITE|EXEC, MAP_PRIVATE|ANON */
+lVar9  = 0;
+bVar1  = true;
+uVar7  = 0x39;                                   /* the rolling key */
+sVar4  = strlen(local_c8);
+do {
+  clock_gettime(1,&local_e8);
+  iVar2 = 0;
+  do { iVar2 = iVar2 + 3; } while (iVar2 != 3000);
+  clock_gettime(1,&local_d8);
+  if (20000000 < (ulong)(((local_d8.tv_sec - local_e8.tv_sec) * 1000000000 +
+                          local_d8.tv_nsec) - local_e8.tv_nsec)) {
+    uVar7 = ~uVar7;                              /* poison */
+  }
+  uVar8   = 0;
+  auVar10 = pshuflw(extraout_XMM0,ZEXT216(CONCAT11((char)uVar7,(char)uVar7)),0);
+  *puVar5 = (&DAT_00102040)[lVar9] ^ auVar10._0_8_;
+  if ((int)lVar9 < (int)sVar4) {
+    uVar8 = (uint)(char)local_c8[lVar9];
+    uVar7 = uVar7 ^ uVar8;                       /* key rolls on the flag itself */
+  }
+  iVar2 = FUN_001014d0(puVar5,uVar8);
+  *puVar5 = 0;
+  if (iVar2 == 0) bVar1 = false;
+  lVar9 = lVar9 + 1;
+} while (lVar9 != 0x21);
+
+if (((int)sVar4 == 0x21) && (bVar1)) puts("SUCCESS: Flag is correct!");
+```
+
+So: an 8-byte block is read from a table at `0x00102040`, XORed with one key byte broadcast eight
+times by `pshuflw`, written to the mmap page, and handed to a checker along with one character of
+my input. The key then rolls, `k ^= flag[i]`, starting from `k0 = 0x39`. The success condition is
+33 characters long and every round returning true.
+
+The `mmap` is set dressing. The page is RWX and the decrypted block gets written into it, which
+reads like a JIT emitting a stub per character, but nothing ever calls through `puVar5`.
+`FUN_001014d0` takes it as `char *` and only indexes it. The "generated code" is only ever read
+as data.
+
+### The timing gate
+
+The busy loop counts to 3000 in steps of 3, so 1000 iterations. Natively that is microseconds.
+Under a debugger single-stepping it is not, and above 20 ms the binary does `k = ~k`.
+
+That is the whole anti-debug, and it is nastier than a `ptrace` check because it does not stop or
+crash. It silently flips the keystream, the constant checks fail, and you get `FAILED` with no
+indication that the debugger caused it.
+
+The flip is self-cancelling, though. The key chain is XOR-based and `~k ^ c == ~(k ^ c)`, so a
+second firing restores the true keystream and only an odd cumulative number of firings garbles
+the block being decrypted. Simulated against the real table with the correct flag, one firing at
+round 0 poisons all 33 rounds, but firing on every round, which is what single-stepping actually
+produces, leaves an alternating `010101...0` pattern with 16 of the 33 rounds still passing.
+Either way the binary says `FAILED`, and anyone stepping through this hunting for a comparison
+would have chased a phantom.
+
+None of which matters if you never run it. Reading the table out of the file gives the gate
+nothing to detect.
+
+### The state machine
+
+`FUN_001014d0` at `0x1014d0` is a `while(true)` over a `local_4` state variable, dispatched through
+a binary search on the state value. `objdump` over `0x14d0`-`0x17c0` shows 23 distinct state
+constants compared against `%eax`: 22 handled cases plus `0x999`, the terminator that returns.
+It looks like a lot. It is not, because most of the states are unreachable. Following only what is
+actually entered from the initial state `0x5a1`:
+
+| State | Action | Next |
+|---|---|---|
+| `0x5a1` | require `d[0] == 0x7a` | `0x2bc` |
+| `0x2bc` | `acc = d[1]` | `0xe4f` |
+| `0xe4f` | require `d[2] == 0xe5` | `0x11a` |
+| `0x11a` | `c ^= acc` | `0x77b` |
+| `0x77b` | require `d[3] == 0x7a` | `0xa39` |
+| `0xa39` | `acc = d[4]` | `0xcd1` |
+| `0xcd1` | require `d[5] == 0xc3` | `0x55e` |
+| `0x55e` | `c += acc` | `0x88f` |
+| `0x88f` | require `d[6] == 0x9f` and `d[7] == 0x90` | `0xf02` |
+| `0xf02` | `return c == 0` | `0x999` (exit) |
+
+Ghidra prints the constants as signed chars, so `-0x1b` is `0xe5`, `-0x3d` is `0xc3`, `-0x61` is
+`0x9f`, `-0x70` is `0x90`, and `'z'` is `0x7a`. Any failed comparison jumps to `0xdead`, which no
+case handles, so it falls into the default and returns false.
+
+The other twelve states (`0x101`, `0x202`, `0x303`, `0x404`, `0x505`, `0x606`, `0x707`, `0x808`,
+`0x909`, `0xaaa`, `0xbbb`, `0xccc`) are decoys that mangle `acc` and `c` in interesting looking
+ways and are never entered. `0x101` `0x303` `0x404` `0x505` even chain into a loop, though it is a
+bounded one: `0x505` does `c = c - 1` on every lap and `0x404` bails to `0xdead` once `c < 0xb`, so
+it always drains out instead of spinning. The tell is aesthetic: every decoy value is a typed-out
+digit pattern, `0x101` through `0x909` being one digit either side of a zero and `0xaaa` `0xbbb`
+`0xccc` being one digit three times over, while the working transitions run on arbitrary values.
+Only the `0x999` exit sits on the wrong side of that line. Once I mapped the transitions the noise
+fell away.
+
+What is left is that six of the eight block bytes are fixed constants and only `d[1]` and `d[4]`
+carry data, and the return is:
+
+```c
+((c ^ d[1]) + d[4]) & 0xff == 0
+```
+
+That is a bijection in `c`. There is exactly one character that satisfies it:
+
+```c
+c = d[1] ^ ((-d[4]) & 0xff)
+```
+
+No search, no z3, no angr. Each round hands over its own character.
+
+### Recovery
+
+The rolling key means block `i+1` cannot be decrypted until `flag[i]` is known, so the whole thing
+is a single forward pass: decrypt with the current `k`, solve for `c`, roll `k ^= c`, repeat.
+Ghidra's `0x00102040` is file offset `0x2040` at an image base of `0x100000`.
+
+```python
+N     = 0x21                                    # 33 blocks, and strlen(flag) must be 0x21
+K0    = 0x39
+CONST = {0: 0x7A, 2: 0xE5, 3: 0x7A, 5: 0xC3, 6: 0x9F, 7: 0x90}
+
+k, out = K0, []
+for i in range(N):
+    blk = raw[off + 8*i : off + 8*i + 8]
+    d   = bytes(b ^ k for b in blk)
+    for pos, want in CONST.items():
+        if d[pos] != want:
+            return None                         # wrong table offset, bail
+    c = d[1] ^ ((-d[4]) & 0xFF)                 # the equation, solved for c
+    if not (0x20 <= c < 0x7F):
+        return None
+    out.append(c)
+    k ^= c
+```
+
+The six constants double as a self-check: if the offset or the key start is wrong, block 0 fails
+immediately instead of producing plausible garbage. The first three rounds:
+
+| i | k | table bytes | XOR k | forced char |
+|---|---|---|---|---|
+| 0 | `0x39` | `43 60 dc 43 f8 fa a6 a9` | `7a 59 e5 7a c1 c3 9f 90` | `f` |
+| 1 | `0x5f` | `25 b5 ba 25 25 9c c0 cf` | `7a ea e5 7a 7a c3 9f 90` | `l` |
+| 2 | `0x33` | `49 81 d6 49 1e f0 ac a3` | `7a b2 e5 7a 2d c3 9f 90` | `a` |
+
+Worth noticing in that dump: byte 0 and byte 3 of every raw block are identical, because both
+decrypt to `0x7a` under the same key byte. So `k = raw[8i] ^ 0x7a` reads the entire keystream
+straight off column 0 of the table, with no reference to the flag at all. The self-referential key
+chain that looks like it forces a sequential solve is redundant, and the timing gate is protecting
+a value the file gives away in the first column.
+
+Replaying the binary's own loop over the recovered string passes all 33 rounds, and feeding it back
+to the binary gives `SUCCESS: Flag is correct!`.
+
+```text
+[*] table @ 0x2040: OK
+[+] table offset = 0x2040
+[+] length = 33 (must be 0x21 = 33)
+[+] full replay of the binary's own check: PASS
+```
+
+Flag: `flag{ECSC2026_jit_time_gate_8d2a}`
+
+## Takeaway
+
+Timing anti-debug defends against exactly one thing, someone running the binary. The RWX page, the
+poisoned keystream and the 22-case state machine are all dynamic-analysis costs too, and every one
+of them is free to skip if you read `.rodata` and work out the algebra instead. Obfuscation that is only expensive to *execute* is not obfuscation.
+
+The real defect is the shape of the check. `((c ^ d[1]) + d[4]) & 0xff == 0` is invertible in `c`,
+so the verifier is not comparing the input against a secret, it is *storing* the secret in a mildly
+scrambled form and inviting you to run the scrambling backwards. Any per-character check of the
+form `f(c, data) == 0` that is one-to-one in `c` has this property, and splitting it across 33
+rounds with a rolling key does not change it, it just makes the extraction a loop.
+
+The correct implementation is not more obfuscation, it is to stop shipping the answer. Compare a
+salted, deliberately slow KDF digest (Argon2id, scrypt) of the *whole* input against one stored
+hash, so the binary contains nothing that can be inverted and recovering the input means searching
+the keyspace rather than doing one XOR per character. If a program genuinely must resist a
+debugger, the thing being gated has to be something the attacker cannot derive offline, such as a
+key fetched from a server after attestation. Flipping a local key that the file already leaks buys
+nothing.

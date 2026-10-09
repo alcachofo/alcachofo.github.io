@@ -1,0 +1,42 @@
+---
+title: "2021 pendrive"
+description: "You're given a ZIP containing image.img — a pendrive image. Find the flag."
+date: 2026-02-13T12:13:00.000Z
+tags: ["ctf", "forensics", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Forensics"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Forensics  
+**Difficulty:** 70
+
+## Challenge
+
+You're given a ZIP containing `image.img` — a pendrive image. Find the flag.
+
+## Solution
+
+### Identifying the image
+
+The `.img` file is a FAT16 filesystem — a USB pendrive image, matching the challenge name. Browsing the filesystem reveals several files and folders, but nothing obvious.
+
+### Finding the deleted file
+
+Looking at the root directory entries, there's a deleted file: `SECRETO.ZIP` (22,338 bytes). The first byte of the directory entry is `0xE5`, which is how FAT marks deleted files. However, the FAT chain is still intact (clusters 3 through 13), meaning the data hasn't been overwritten.
+
+### Recovering the file
+
+Wrote a Python script to parse the FAT16 structure, follow the cluster chain, and reconstruct the deleted ZIP. Reading clusters 3→4→5→...→13 produced a valid ZIP file.
+
+### Extracting the flag
+
+Inside `Secreto.zip` was `Secreto.png` — an image with a "TOP SECRET" message in Spanish about a zombie virus. One of the lines reads:
+
+> Empieza por los conocidos amigos y familia con la clave flag\{IdontForget$$\}
+
+Flag: `flag{IdontForget$$}`
+
+## Takeaway
+
+Deleting a file on a FAT filesystem doesn't erase the data — it just marks the directory entry with `0xE5` and frees the clusters in the FAT table. If the clusters haven't been overwritten, the file is fully recoverable. Tools like `autopsy`, `foremost`, `testdisk`, or even a custom Python parser can do the job. This is the bread and butter of digital forensics.

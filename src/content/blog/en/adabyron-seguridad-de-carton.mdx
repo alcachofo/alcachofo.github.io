@@ -1,0 +1,48 @@
+---
+title: "Seguridad de cartón"
+description: "A \"SECURE VAULT\" web page with a password input, protected by what it calls \"Advanced Client-Side Protection.\" Right-click is disabled and DevTools shortcuts (F12, Ctrl+Shift+I, Ctrl+U) are..."
+date: 2026-02-13T12:25:00.000Z
+tags: ["ctf", "pentesting-web", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 250
+
+## Challenge
+
+> No hace falta que busques la flag... Siempre la has tenido.
+
+A "SECURE VAULT" web page with a password input, protected by what it calls "Advanced Client-Side Protection." Right-click is disabled and DevTools shortcuts (F12, Ctrl+Shift+I, Ctrl+U) are blocked.
+
+## Solution
+
+### Bypassing the "protection"
+
+The anti-debug measures are all client-side: `oncontextmenu="return false"` for right-click, a `keydown` handler blocking F12 and common DevTools shortcuts. None of these actually prevent viewing the source — just open DevTools before navigating to the page, use `view-source:` in the URL bar, or `curl` the page.
+
+### Reading the obfuscated JS
+
+The authentication logic is entirely in the browser. The JavaScript defines an array of hex-encoded strings:
+
+```javascript
+var _0x4f2a = ["\x76\x61\x6C\x75\x65", "\x67\x65\x74\x45\x6C\x65\x6D\x65\x6E\x74\x42\x79\x49\x64", ...];
+```
+
+Hex escapes are just an alternate way to write ASCII. Decoding the array reveals everything — including the password and the flag:
+
+| Index | Decoded |
+|-------|---------|
+| 7 | `FLAG{JS_Obfuscation_Bypassed}` |
+| 8 | `Correct! ` |
+| 9 | `supersecret` |
+
+The `check()` function compares input against `_0x4f2a[9]` (`supersecret`), and on success displays `_0x4f2a[8] + _0x4f2a[7]` — the flag. You don't even need to enter the password; the flag is sitting right there in the source.
+
+Flag: `FLAG{JS_Obfuscation_Bypassed}`
+
+## Takeaway
+
+The challenge name says it all — cardboard security. The flag, the password, and the entire authentication logic are delivered to the user's browser in full. Hex-encoding strings is a visual deterrent, not a cryptographic one. Client-side validation is never security; it's just UX. Everything that runs in the browser belongs to the user.

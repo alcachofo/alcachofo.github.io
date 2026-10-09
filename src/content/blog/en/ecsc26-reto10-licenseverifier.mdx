@@ -1,0 +1,137 @@
+---
+title: "Reto10_LicenseVerifier"
+description: "A single stripped, statically linked ELF that prompts for a license password and prints Access Granted! <flag> if it likes what you typed."
+date: 2026-08-04T12:03:00.000Z
+tags: ["ctf", "reversing", "ecsc26"]
+ctf: "ECSC 2026 Spanish Qualifier (INCIBE)"
+category: "Reversing"
+---
+
+**CTF:** ECSC 2026 Spanish Qualifier (INCIBE)  
+**Category:** Reversing  
+**Difficulty:** 500  
+
+## Challenge
+
+A single stripped, statically linked ELF that prompts for a license password and prints `Access Granted! <flag>` if it likes what you typed. The statement sold it on its "robustez mediante hilos concurrentes" (robustness through concurrent threads).
+
+## Solution
+
+### Getting the names back
+
+`file` gave me the whole plan in one line:
+
+```text
+challenge_binary: ELF 64-bit LSB executable, x86-64, version 1 (SYSV),
+statically linked, Go BuildID=pmKunzBnS0GP6BPw_DAU/..., stripped
+```
+
+Stripped, but Go, and that combination is much weaker than it sounds. The Go toolchain embeds a `pclntab` so the runtime can build stack traces and panic messages, and `strip` does not remove it. Function names, and even source file and line numbers, survive the loss of the symbol table. Ghidra's Golang analyzer parses that table and hands them all straight back.
+
+A static Go binary decompiles into thousands of runtime functions, so instead of running the full decompiler pass I filtered down to what the pclntab had named for me:
+
+```python
+for fn in prog.getFunctionManager().getFunctions(True):
+    name = fn.getName()
+    if name.startswith("main.") or "realCheck" in name or "decoy" in name:
+        targets.append(fn)
+```
+
+That returned `main.main`, `main.realCheck`, `main.decoy1/2/3` and their goroutine wrappers, each annotated with its line in `/app/main.go`. The author's own naming had already answered the challenge's central question before I decompiled a single instruction.
+
+### The concurrency is theater
+
+All three decoys are the same shape. `decoy1`, from `main.go:14`:
+
+```c
+while( true ) {
+  bVar2 = runtime_chanrecv2(local_30,&local_38);
+  uVar1 = local_38;
+  if (!bVar2) break;
+  local_40 = (uVar1 ^ 0x5a5a5a5a5a5a5a5a) << 5 | (uVar1 ^ 0x5a5a5a5a5a5a5a5a) >> 0x3b;
+  time_Sleep(10000);
+  runtime_chansend1(local_28,&local_40);
+}
+runtime_closechan(local_28);
+```
+
+Read a uint64 off one channel, mangle it, sleep 10 microseconds, push it to the next. `decoy2` does `x * 0x539 + 0xdeadbeef`, `decoy3` does `x ^ (x >> 12)`. `main.main` wires them into a pipeline over four channels, adds a `sync.WaitGroup`, feeds two constants in and closes the head.
+
+The interesting part is what happens at the end of that pipeline. `main.main.func1` is the goroutine draining the last channel:
+
+```c
+while( true ) {
+  bVar1 = runtime_chanrecv2(local_10,&local_18);
+  if (!bVar1) break;
+  local_18 = 0;
+}
+```
+
+It receives and throws the value away. Nothing downstream ever reads the result. The password never enters the pipeline in the first place: the two values sent in are fixed constants. So the goroutines, the channels and the WaitGroup exist purely to make the control flow look wide, and `main.main` calls `main.realCheck(password)` on the side, entirely outside all of it. The "concurrency hardening" is the misdirection, not the protection.
+
+### The real check
+
+`main.realCheck` is fifteen lines of arithmetic:
+
+```c
+if (param_2 != 0x10) {
+  return 0;
+}
+...
+local_48[0] = 0x1337c0de;
+local_48[1] = 0xdeadbeef;
+local_48[2] = 0xfaceb00c;
+local_48[3] = 0xbaadc0de;
+uVar4 = *puVar1;
+uVar5 = puVar1[1];
+for (iVar2 = 0; iVar2 < 4; iVar2 = iVar2 + 1) {
+  uVar3 = uVar4 ^ uVar5 * 0x1f + local_48[iVar2];
+  uVar4 = uVar5;
+  uVar5 = uVar3;
+}
+if (uVar4 == 0x2beebe63cd5ceab) {
+  uVar4 = CONCAT71(0xcf4d98741ff3dc,uVar5 == 0xcf4d98741ff3dc05);
+}
+```
+
+The password is exactly 16 bytes, read as two little-endian uint64s. Four rounds of `c = a ^ (b * 0x1f + K[i])` with a swap, compared against two fixed constants. Ghidra printed the locals as `uint`, but the target constants are plainly 64-bit, so the arithmetic is mod 2^64.
+
+That structure is a Feistel round, and a Feistel round is a bijection no matter what the round function does. The new pair is `(b, a ^ f(b))`, and `b` is carried across untouched, so given the output you read `b` back directly and recover `a` by XORing the same `f(b)` off again. No search, no z3, no brute force:
+
+```python
+def backward(a, b):
+    for i in range(3, -1, -1):
+        a, b = b ^ ((a * 0x1F + K[i]) % M), a
+    return a, b
+```
+
+Running it from the target constants and then re-running the original loop forward as a check:
+
+```text
+[+] a0 = 0x5f636e79735f3067
+[+] b0 = 0x39385f796f633364
+[+] forward check: 0x02beebe63cd5ceab 0xcf4d98741ff3dc05  MATCH
+[+] password bytes : 67305f73796e635f6433636f795f3839
+[+] printable ASCII: True
+[+] password       : 'g0_sync_d3coy_89'
+```
+
+Sixteen printable bytes on the first try, spelling `g0_sync_d3coy_89`, which is a good sign the inversion was right and not an accident. Feeding it to the binary printed the flag.
+
+The flag never sits in the binary as a string, incidentally. `main.main` builds a 51-byte array on the stack and XORs it byte by byte with the password repeating:
+
+```c
+ptr[iVar4] = local_153[iVar4] ^ local_120[iVar4 % uVar6];
+```
+
+So the password is not just compared against a constant, it is the key. `strings` was never going to find anything, and a patched-out comparison would have printed garbage.
+
+Flag: `flag{ECSC2026_go_sync_channels_decoy_reversed_28b1}`
+
+## Takeaway
+
+Two lessons, and the second is the one that matters.
+
+Stripping a Go binary buys almost nothing. The `pclntab` is load-bearing for the runtime, so names and source lines stay in the file and any Golang-aware analyzer recovers them. If a Go binary's symbols look gone, check before assuming you are working blind.
+
+The real flaw is that the license check is invertible. The author wrapped it in goroutines, channels and a WaitGroup, but obfuscation only costs an attacker time, and here the actual comparison was four rounds of a Feistel network, a construction whose entire design goal is to be reversible. Any check built from bijections hands you its input the moment you find it, and the surrounding complexity is irrelevant. A real license verifier should never be locally invertible: either verify a signature the client cannot forge (Ed25519 over the license blob, public key in the binary, private key on your server), or compare a slow one-way KDF (Argon2id, scrypt) against a stored digest. Then recovering a valid key means breaking the primitive, not undoing arithmetic in a for loop.

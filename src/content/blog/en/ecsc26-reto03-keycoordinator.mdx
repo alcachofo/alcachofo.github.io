@@ -1,0 +1,201 @@
+---
+title: "Reto03_KeyCoordinator"
+description: "A line-JSON TCP service running a two-party threshold ECDSA coordinator on secp256k1. The signing key is split additively, x = x1 + x2, and the nonce the same way, k = k1 + k2."
+date: 2026-08-04T12:10:00.000Z
+tags: ["ctf", "cryptography", "ecsc26"]
+ctf: "ECSC 2026 Spanish Qualifier (INCIBE)"
+category: "Cryptography"
+---
+
+**CTF:** ECSC 2026 Spanish Qualifier (INCIBE)  
+**Category:** Cryptography  
+**Difficulty:** 1600  
+
+## Challenge
+
+A line-JSON TCP service running a two-party threshold ECDSA coordinator on secp256k1. The signing key is split additively, `x = x1 + x2`, and the nonce the same way, `k = k1 + k2`. On connect it hands you the group public key `Y` and your own share `x1`; you then submit a message and your nonce share `k1`, and it answers with a partial signature. The only file shipped is `crypto_utils.py`. To get the flag you have to produce a full signature over `admin_claim` that verifies under `Y`.
+
+## Solution
+
+### Learning the protocol
+
+No HTTP on the port, just a raw banner. Everything is newline-delimited JSON:
+
+```json
+{"Y_x": "0x...", "Y_y": "0x...", "player_share": "0x..."}
+```
+
+```json
+{"action": "sign", "msg": "4142434445", "k1": "0x..."}
+{"r": "0x...", "s2": "0x...", "R_x": "0x...", "R_y": "0x..."}
+```
+
+I wrote `collect.py` to answer four questions in a single connection rather than four round trips: what a sign response looks like, whether it would simply sign `admin_claim` for me (hex `61646d696e5f636c61696d`), whether one socket serves many requests, and how big `k2` actually is.
+
+It answered three of them and then killed itself on the fourth. It *will* sign `admin_claim`, and one socket serves request after request. But the harvest loop stored `resp["s"]` when the field on the wire is `s2`, so it raised `KeyError` on the first signature it tried to keep. Everything below that line, including the BSGS sizing of `k2`, never ran, and the `sigs.json` it was supposed to write does not exist. The response shape that would have told me the field name had been printed by the same script two sections earlier.
+
+What did land: the coordinator returns a partial, not a signature, and every response carries the nonce point `R` in full next to `r`. `R_x` matched `r` in every response I later checked, so `r` is the x coordinate of the `R` the server publishes. Whether that `R` is the combined nonce `(k1 + k2)G` or only the coordinator's own `k2*G` was still open, and that is the question the whole attack rests on.
+
+### The trap
+
+Before any lattice I needed to know what `s2` actually is. That should have been the cheap part: I know `k1`, `R`, `x1` and `Y`, so `Y2 = Y - x1*G = x2*G` is a known point, and every hypothesis about `s2` turns into an equation between points that either holds or does not. No secrets involved.
+
+So I enumerated. `analyze.py` tested six shapes, `analyze2.py` added hash conventions and a Schnorr-style form, `analyze3.py` brute-forced the whole cross product of nonce point, `r` convention, hash convention and key. Three passes, and every single one printed nothing. Not "the wrong one matched": *nothing* matched, across every convention the three passes could think to try between them.
+
+So I attacked the nonce instead. `dlhunt.py` was meant to bound the discrete log of `k2` by BSGS out to `2^48`, against both `R` and `R - k1*G`, on the theory that whichever of the two had a small log would also settle the nonce convention. It never reached the network. Sage rejected the generator on the line that builds it, before the script ever opened the socket:
+
+```text
+TypeError: Coordinates [55072459812593149470081078287289518006045837300885624485049308662822940938361,
+32670510020758816978083085130507043184471273380659244275103837584475851025005, 1] do not define a
+point on Elliptic Curve defined by y^2 = x^3 + 7 over Finite Field of size 1157920892373161954235709...
+```
+
+So that experiment produced no bound at all, and the sizing question stayed open. What it produced instead was better. Those two coordinates came straight out of the shipped file, which starts with:
+
+```python
+P = 2**256 - 2**32 - 977
+N = 115792089237316195423570985008687907852837564279074904382605163141518161494337
+A = 0
+B = 7
+```
+
+and then, thirty-three lines later:
+
+```python
+Gx = 55072459812593149470081078287289518006045837300885624485049308662822940938361
+Gy = 32670510020758816978083085130507043184471273380659244275103837584475851025005
+G = Point(Gx, Gy)
+```
+
+Given as decimal, which is exactly why nobody looks twice. In hex against the real secp256k1 generator:
+
+| | shipped | real secp256k1 |
+|---|---|---|
+| `Gx` | `0x79c1e85ab41cbbd1db20042ccbf53ab10b8317ea1de3aa971eea084104079079` | `0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798` |
+| `Gy` | `0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68627ae73358b92cb976a6d` | `0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8` |
+
+The `y` coordinate reproduces the real `Gy` for its first 21 bytes and then quietly diverges. It looks right at a glance and it is not.
+
+The test that settles it needs no secrets: for any point, the curve constant it satisfies is recoverable as `B = y^2 - x^3 mod p`.
+
+```python
+def curve_b(x, y):
+    return (y * y - x * x * x) % P
+```
+
+```text
+B for shipped G  = 17775011642816734540484377445438549038167425890502682422459182612844129742001
+B for real G     = 7
+B for server Y   = 7
+B for server R   = 7
+```
+
+The shipped generator is not on `y^2 = x^3 + 7`. The server's public key and the nonce point it returned are. So the service is on genuine secp256k1 and the file is booby-trapped. `point_add` and `point_mul` in `crypto_utils.py` never validate anything, so with an off-curve base point they keep returning perfectly well-formed 256-bit numbers that mean nothing. No exception, no warning, three analysis passes burned. `analyze2.py` had even run the file's own `verify_signature` on the partial and got `False` under `Y`, under `Y2` and under `x1*G`; all three of those answers were computed through the trap generator, so none of them meant anything either.
+
+### The relation
+
+Redoing the same ladder with the real generator, in Sage this time:
+
+```python
+E = EllipticCurve(GF(P), [0, 7])
+G = E(GX, GY)
+Y2 = Y - x1 * G          # = x2*G
+```
+
+| hypothesis | holds |
+|---|---|
+| `s2 * R == h*G + r*Y2` | **yes** |
+| `s2 * (R + k1*G) == h*G + r*Y2`, i.e. the published `R` is only `k2*G` | no |
+| `s2 * R == h*G + r*Y` (full key) | no |
+| `s2 * R == r*Y2` (no hash term) | no |
+
+`solve.py` actually prints five rows, not the four above. Its second one is labeled for the `R = k2*G` reading, but I handed it the same two operands as its own first row, so it could only ever echo that row's answer. It discriminated nothing and I should have deleted it. The row that really tests that reading is the second one in the table above, which moves `k1*G` to the left-hand side instead.
+
+So `s2 = k^-1 (h + r*x2)`, where `k` is the discrete log of the published `R` and `x2` is the coordinator's share. The coordinator contributes only its own key share to the numerator. What these four equations do *not* settle is whether my `k1` is inside that `k`. They pin down which point the signature was made against, not how the server built it. That part gets decided further down, by whether the lattice converges.
+
+The relation also says what the partial is. `(r, s2)` is a valid ordinary ECDSA signature: `u1*G + u2*Y2` with `u1 = h/s2` and `u2 = r/s2` comes to `(h + r*x2)/s2 * G`, which is `R`, whose x coordinate reduces to `r`. It just verifies under `Y2 = Y - x1*G`, the coordinator's half of the key, and not under `Y`. So the service will sign `admin_claim` for anyone who asks, with the wrong key. The flag check wants `Y`.
+
+Rearranged on the hypothesis that the server folds my nonce in, so `k = k1 + k2`, with `h` and `r` known and `k1` chosen by me:
+
+```text
+k2 = h/s2 - k1 + (r/s2) * x2   (mod N)
+   = A_i + B_i * x2
+```
+
+One shared unknown `x2`, one per-signature `k2` that has to be short for any of this to work. If that shape is right this is the Hidden Number Problem in its textbook form, and if it is wrong the lattice simply will not converge.
+
+```python
+for msg, k1, r, s2 in sigs:
+    sinv = Integer(pow(int(s2), -1, int(N)))
+    A.append((sha(msg) * sinv - k1) % N)
+    B.append((r * sinv) % N)
+```
+
+### The lattice
+
+I harvested 80 partials, all on the same socket, and ran the whole solve inside that one session on the assumption that the coordinator regenerates its shares per connection. I never tested that assumption, and never had to: `solve.py` opens exactly one socket and does the harvest, the recovery and the submission on it.
+
+Standard HNP lattice, scaled by `N` to keep every entry integral:
+
+```python
+def try_lattice(m, b):
+    T = Integer(2) ** b
+    d = m + 2
+    L = Matrix(ZZ, d, d)
+    for i in range(m):
+        L[i, i] = N * N
+    for i in range(m):
+        L[m, i]     = N * B[i]
+        L[m + 1, i] = N * A[i]
+    L[m, m] = T
+    L[m + 1, m + 1] = N * T
+    for row in L.LLL():
+        ...
+        x2 = Integer(num // T) % N
+        if x2 * G == Y2:
+            return x2
+```
+
+I did not know the bias width, so rather than guess I laddered `b` over `248, 240, 224, 192, 160, 128, 96, 64` and `m` over `60, 40, 20`, with `x2 * G == Y2` as the accept test. A candidate is either the real share or it is discarded, no ambiguity. It hit on the very first rung: `b = 248, m = 60`.
+
+That rung is the loosest bound in the ladder, so it fixes a floor and not a width: `k2` is short by at least eight bits. It cannot say more, since a wider bias makes the target vector shorter still and would have been found at `b = 248` as well. Nothing else in the solve measures the leak, so a floor of eight bits is all I can claim.
+
+What the hit does settle is the protocol. `A_i` was built with `-k1` in it, so the lattice only has a short solution if `k - k1` is small, which is exactly the claim that the coordinator folded my nonce share into `R`. It converged, and the recovered `x2` satisfied `x2 * G == Y2`, so `k = k1 + k2` was the right reading.
+
+```text
+[+] x2 = 0x...
+[+] x  = x1 + x2
+[+] VERIFY x*G == Y : True
+```
+
+### Claiming admin
+
+With `x = x1 + x2` verified against the advertised public key, the coordinator is redundant. I signed `admin_claim` locally as an ordinary single-party ECDSA, ran the verification myself first so nothing unverified went on the wire, and submitted:
+
+```python
+h = Integer(int(hashlib.sha256(b"admin_claim").hexdigest(), 16))
+k = Integer(random.randrange(1, N))
+Rp = k * G
+r = Integer(Rp[0]) % N
+s = (Integer(pow(int(k), -1, int(N))) * (h + r * x)) % N
+
+w = Integer(pow(int(s), -1, int(N)))
+Rv = (h * w % N) * G + (r * w % N) * Y
+assert Integer(Rv[0]) % N == r          # local ECDSA verify
+```
+
+```json
+{"action": "flag", "msg": "61646d696e5f636c61696d", "r": "0x...", "s": "0x..."}
+```
+
+Flag: `flag{ECSC2026_frost_threshold_ecdsa_biased_nonce_hnp_lattice_key_recovery}`
+
+## Takeaway
+
+Two separate lessons, and the first one is not really about cryptography.
+
+**Do not trust the constants a challenge hands you, and do not use unvalidated point arithmetic to test a theory.** The shipped `crypto_utils.py` declares `B = 7` and then ships a generator that is not on that curve, and its `point_add` / `point_mul` silently produce garbage instead of raising. Every conclusion I drew for three passes was built on that. Sage raised on the same coordinates the first time I fed them to it, which is the entire difference between a library that validates in the constructor and one that does not. The fix on my side is one line, `B = y^2 - x^3 mod p`, applied to a point the *server* produced, which tells you what curve the other side is actually on rather than what your local file claims. Any real implementation should reject a point that fails `y^2 == x^3 + ax + b`, and should reject it on construction, not hope the caller checks.
+
+**The crypto bug is a biased nonce contribution in a threshold signing scheme.** In additive two-party ECDSA the coordinator returns `s2 = k^-1(h + r*x2)` with `k = k1 + k2`, where the counterparty picks `k1`. That is fine only while `k2` is uniform over `[1, N)`. Here it was short by at least eight bits, and that much leakage per signature is already fatal. Lattice reduction over 60 of the 80 partials I harvested turns it into a full key recovery, and the key recovered is the *group* key, not just the server's share, because I supplied the other half myself.
+
+This is the same failure that has broken Sony's PS3, Android Bitcoin wallets and several early MPC custody products. Nonce generation in ECDSA has no safety margin at all: one nonce reused across two signatures leaks the key from that pair alone, and a few bits of bias leaks it from the sixty signatures the lattice took here. Threshold schemes like GG18/GG20 and FROST make this worse, not better, because each party's contribution is now an independently implementable place to get it wrong, and the honest parties cannot see that a peer's nonce is short. Derive nonces deterministically per RFC 6979, sample by rejection over the full range rather than reducing a fixed-width value mod `N`, and where the scheme allows it require each party to commit to its nonce point before the others reveal theirs.

@@ -1,0 +1,52 @@
+---
+title: "DoItYourself"
+description: "You're given an image of a USB Ledger wallet. The goal is to find a hidden mnemonic passphrase and use it to authenticate on a verification website."
+date: 2026-02-13T12:26:00.000Z
+tags: ["ctf", "web3", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Web3"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Web3  
+**Difficulty:** 350
+
+## Challenge
+
+You're given an image of a USB Ledger wallet. The goal is to find a hidden mnemonic passphrase and use it to authenticate on a verification website.
+
+## Solution
+
+### Step 1 — Steganography: Extracting the QR
+
+Opened the Ledger wallet image in StegSolve and extracted the alpha channel. Hidden in it was a QR code, along with a single line of binary data at the bottom of the image.
+
+The page title contained a clue: `[700 306 528]`.
+
+### Step 2 — Decoding the hidden line
+
+The three numbers pointed to the binary data:
+
+- **700** — the row number where the data line sits
+- **306** — the starting pixel of the data
+- **528** — the ending pixel of the data
+
+Extracting and analyzing the binary between pixels 306 and 528 on line 700 revealed the data was a compressed payload. After decompression, it yielded 11 hex indices corresponding to BIP-39 wordlist positions — 11 of the 12 words of a mnemonic seed phrase. The 12th word was brute-forced as the BIP-39 checksum word.
+
+### Step 3 — The mnemonic
+
+The full 12-word seed phrase:
+
+```
+proof erupt original half defense purity blast adjust dove sense pistol member
+```
+
+### Step 4 — Getting the flag
+
+The QR code led to a verification page (`https://diy.byronlabs.io:8443/...`) that asked for the mnemonic passphrase. Entering the 12 words gave the flag.
+
+Flag: `flag{0df18b125ccb258bcf84b0b4a5c144e7f47a334934de66ac57886f37984049ff}`
+
+## Takeaway
+
+A multi-layered challenge that chains steganography, binary analysis, and crypto wallet fundamentals. The key insight is recognizing that the `[700 306 528]` title isn't decoration — it's coordinates pointing directly to the hidden data. From there it's a matter of extracting the binary, decompressing it, and understanding BIP-39 mnemonic structure well enough to recover the full seed phrase.

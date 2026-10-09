@@ -1,0 +1,56 @@
+---
+title: "🧵"
+description: "You're given a 10 MB binary file. The hint is: 🧵 10 Search for it"
+date: 2026-02-13T12:02:00.000Z
+tags: ["ctf", "forensics", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Forensics"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Forensics  
+**Difficulty:** 10
+
+## Challenge
+
+You're given a 10 MB binary file. The hint is: `🧵 10 Search for it`
+
+## Solution
+
+### Reading the hint
+
+The hint breaks down into three parts: 🧵 (thread → `strings`), 10 (minimum string length → `-n 10`), and "Search for it" (`grep`).
+
+### Analysis
+
+The file has an ELF header but it's invalid — the class and byte order are garbage. Entropy is ~8.00 bits/byte, meaning it's essentially random data with strings deliberately embedded in it.
+
+```bash
+$ file challenge
+challenge: ELF invalid byte order, unknown class 168
+```
+
+### Extraction
+
+```bash
+strings -n 10 challenge | grep FLAG
+```
+
+This returns 6 flags among ~400 strings of noise (fake log messages, random data):
+
+```
+FLAG{Y0u_V3ry_Cl0s3_N0w}
+FLAG{Th1s_Is_4_F4k3_Fl4g_S0rry}
+FLAG{N0p3_N0t_Th1s_0n3_E1th3r}
+FLAG{Str1ngs_C0mm4nd_1s_P0w3rful}
+FLAG{Alm0st_Th3r3_But_N0t_Qu1t3}
+FLAG{K33p_D1gg1ng_Y0u_Ar3_Cl0s3}
+```
+
+Five of the six are decoy flags that literally tell you they're fake when you decode the leet speak ("This Is A Fake Flag Sorry", "Nope Not This One Either", "Almost There But Not Quite", etc.). The only one that doesn't discard itself — and directly references the tool used to solve the challenge — is the real flag.
+
+Flag: `FLAG{Str1ngs_C0mm4nd_1s_P0w3rful}`
+
+## Takeaway
+
+The `strings` command is one of the first things to run on any unknown binary in a forensics challenge. The hint spelled out the entire solution: use `strings` with a minimum length of 10 and search through the output. When multiple flags appear, read what they say — decoy flags often tell you they're fake.

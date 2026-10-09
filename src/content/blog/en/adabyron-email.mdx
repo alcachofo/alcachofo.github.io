@@ -1,0 +1,34 @@
+---
+title: "✉️"
+description: "A simple webpage with just a heading and a cryptic hint. No visible flags, no interesting source code."
+date: 2026-02-13T12:18:00.000Z
+tags: ["ctf", "pentesting-web", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 100
+
+## Challenge
+
+> Hello! I feel like I am forgetting to tell you something...
+
+A simple webpage with just a heading and a cryptic hint. No visible flags, no interesting source code.
+
+## Solution
+
+The hint about "forgetting to tell you something" is a nudge toward HTTP response headers — metadata the server sends but browsers don't display on the page.
+
+Opened DevTools, went to the Network tab, reloaded the page, and checked the response headers on the main document request. Sitting right there:
+
+```
+X-flag: FLAG{H34d3rs_C4n_B3_H1dd3}
+```
+
+Flag: `FLAG{H34d3rs_C4n_B3_H1dd3}`
+
+## Takeaway
+
+HTTP headers are invisible to casual page inspection but are one of the most common hiding spots in web CTFs. When a challenge says it's "forgetting" something, think about what the server communicates that isn't rendered on screen. Always check response headers, cookies, and custom `X-*` fields — DevTools is all you need.

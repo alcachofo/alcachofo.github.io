@@ -1,0 +1,101 @@
+---
+title: "Reto02_MessageHub"
+description: "A zip with three files: encrypt.py, pubkey.txt and ciphertexts.txt. The same flag was encrypted twice under the same 1024-bit RSA key with e = 3, each time with a different small random..."
+date: 2026-08-04T12:05:00.000Z
+tags: ["ctf", "cryptography", "ecsc26"]
+ctf: "ECSC 2026 Spanish Qualifier (INCIBE)"
+category: "Cryptography"
+---
+
+**CTF:** ECSC 2026 Spanish Qualifier (INCIBE)  
+**Category:** Cryptography  
+**Difficulty:** 900  
+
+## Challenge
+
+A zip with three files: `encrypt.py`, `pubkey.txt` and `ciphertexts.txt`. The same flag was encrypted twice under the same 1024-bit RSA key with `e = 3`, each time with a different small random offset added to it.
+
+## Solution
+
+`encrypt.py` is the whole challenge, so I read it first:
+
+```python
+p = getPrime(512)
+q = getPrime(512)
+N = p * q
+e = 3
+
+# Flag is shifted by 16 bits to make room for small 12-bit random padding offsets
+M = bytes_to_long(b"flag{...placeholder...}") << 16
+
+r1 = random.randint(1, 2**12)
+r2 = random.randint(1, 2**12)
+
+m1 = M + r1
+m2 = M + r2
+
+C1 = pow(m1, e, N)
+C2 = pow(m2, e, N)
+```
+
+Two things jump out. `e = 3` is tiny, and both ciphertexts encrypt the *same* `M` under the *same* `N`. The messages differ only by `r2 - r1`.
+
+My first reflex on `e = 3` is always the cube root: if `m^3 < N` the modulus never wraps and you just take an integer cube root of the ciphertext. That does not work here. The flag runs to 65 bytes, which puts `m1` at 535 bits once the 16-bit shift is counted, so `m1^3` is 1605 bits against a 1024-bit `N`. It wraps. Dead end, but a cheap one to rule out.
+
+The real shape of this is Franklin-Reiter. If you have two ciphertexts of *related* messages under the same public key, and you know the relation, the plaintext falls out algebraically. Write `d = r2 - r1`. Then `m1` is a common root of two polynomials over `Z_N[x]`:
+
+```text
+f(x) = x^3 - C1
+g(x) = (x + d)^3 - C2
+```
+
+Both vanish at `x = m1`, so `(x - m1)` divides their gcd. Compute `gcd(f, g)` over `Z_N[x]` and you get a linear polynomial whose root is the message. For general `e` you implement polynomial gcd over the ring. For `e = 3` you can do the elimination by hand and skip the code entirely. Expanding `g`:
+
+```text
+m1^3 + 3*d*m1^2 + 3*d^2*m1 + d^3 = C2
+```
+
+and substituting `m1^3 = C1` leaves a quadratic. Eliminating the `m1^2` term against `m1^3 = C1` collapses it to a closed form:
+
+```text
+m1 = d * (2*C1 + C2 - d^3) / (C2 - C1 + 2*d^3)   (mod N)
+```
+
+The only thing I did not have was `d`. But `r1` and `r2` are both drawn from `[1, 2^12]`, so `|d| < 4096`. That is 8192 candidates, one modular inversion each. Sweeping it is free:
+
+```python
+for d in range(-LIMIT, LIMIT + 1):
+    if d == 0:
+        continue
+    den = (C2 - C1 + 2 * pow(d, 3)) % N
+    if den == 0:
+        continue
+    inv = pow(den, -1, N)
+    m1 = (d * (2 * C1 + C2 - pow(d, 3)) % N) * inv % N
+    if pow(m1, 3, N) == C1:
+        found = (d, m1)
+        break
+```
+
+The check on the last line is what makes this clean. I am not eyeballing the output for something that looks like ASCII. A wrong `d` produces a wrong `m1` whose cube is not `C1`, so the arithmetic itself tells me when I am right. I also re-cubed `m2 = m1 + d` against `C2` afterwards, so both encryptions are explained, not just one.
+
+It hit on the first pass:
+
+```text
+[*] e  = 3, N is 1024 bits
+[*] sweeping d = r2 - r1 over +/-4096
+[+] d = r2 - r1 = 2905
+[+] m1 verified: m1^3 == C1 mod N
+[+] m2 check   : OK
+[+] r1 = 1337, r2 = 4242  (both must sit in [1, 4096])
+```
+
+Recovering the flag from there is one shift. The padding lives in the bottom 16 bits and `r1 < 2^16`, so `M = m1 >> 16` and `long_to_bytes(M)` is the plaintext. `r1 = 1337` and `r2 = 4242` are obviously hand-picked rather than random, which was a nice extra confirmation that I had landed on the intended values and not on some algebraic coincidence. The whole script runs in about two seconds, most of that being the roughly 7000 candidate values of `d` the sweep chews through before it reaches 2905.
+
+Flag: `flag{ECSC2026_coppersmith_short_pad_attack_recovered_rsa_message}`
+
+## Takeaway
+
+The flag names Coppersmith's short-pad attack, which is the general version of what I did. When the padding gap is too large to enumerate, you take the resultant of the two polynomials in the unknown difference, which gives you a univariate polynomial with a small root, and you use Coppersmith to find it, then you finish with Franklin-Reiter exactly as above. Here the organizers capped the offsets at 12 bits, so a brute-force sweep replaced the lattice step and the challenge reduced to the closed form.
+
+The underlying bug is that this is not padding. Real padding is not a small integer added to the message; RSA-OAEP is full-width and mixes randomness through a hash into every bit of the encoded plaintext, so two encryptions of the same message have no algebraic relation to exploit and no small difference to search for. Adding `r` to the bottom of the number leaves `m1` and `m2` related by a known-shape polynomial, and that relation is what the attack runs on. The small exponent is not just an aggravating factor, though, it is a precondition. The Franklin-Reiter gcd is taken over degree-`e` polynomials, and the short-pad resultant is degree `e^2`, so the work grows with the exponent and the attack stays practical only while `e` is tiny. The padding scheme is what hands you the relation; `e = 3` is what makes the relation cheap to solve.

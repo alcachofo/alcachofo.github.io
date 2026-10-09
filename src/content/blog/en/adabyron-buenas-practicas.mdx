@@ -1,0 +1,39 @@
+---
+title: "buenas prácticas ✨"
+description: "The website greets you with a simple message: \"API Profile Viewer. Check your profile at /api/user/1001.\""
+date: 2026-02-13T12:23:00.000Z
+tags: ["ctf", "pentesting-web", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 150 
+
+## Challenge
+
+The website greets you with a simple message:
+
+API Profile Viewer
+Check your profile at /api/user/1001
+
+## Solution
+
+The solution is pretty simple. As soon as I saw the api calling users by number, the first thing i thought was to find the first user (which may be the admin).
+
+Trying with /api/user/1001, you get
+```
+{"bio":"Just a guest.","flag":"You wish.","id":1001,"username":"guest"}
+```
+
+When trying my solution (finding the first, id = 1):
+
+```
+{"bio":"I hold the keys.","flag":"FLAG{ID0R_Byp4ss_Simpl3_Int3g3rs}","id":1,"username":"admin"}
+```
+Flag: `FLAG{Us3r_Ag3nt_Sp00f1ng_1s_Fun}`
+
+## Takeaway
+
+This is a real example of how some lazy administrators save ids in order, which make it simple to list them in order of creation, making it obvious that the first account is the creator of the site.

@@ -1,0 +1,45 @@
+---
+title: "No es un bug, es una feature"
+description: "A web app called \"Page Viewer\" that loads content through a URL parameter: https://roca.byronlabs.io/?page=home.php"
+date: 2026-02-13T12:15:00.000Z
+tags: ["ctf", "pentesting-web", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 100
+
+## Challenge
+
+A web app called "Page Viewer" that loads content through a URL parameter: `https://roca.byronlabs.io/?page=home.php`
+
+## Solution
+
+### Identifying the vulnerability
+
+The `page` parameter is a textbook Local File Inclusion (LFI) indicator — the app is likely using PHP's `include()` without sanitizing user input.
+
+### PHP wrapper to read source code
+
+Simply requesting `?page=index.php` won't show the source — the server executes the PHP before sending it. To bypass this, I used a PHP filter wrapper that base64-encodes the file contents before processing:
+
+```
+?page=php://filter/convert.base64-encode/resource=index.php
+```
+
+The server returned a base64 string. Decoding it revealed:
+
+```php
+<?php
+// config.php contains the secret, but visiting it directly shows nothing (PHP executed)
+$flag = "FLAG{LFI_W1th_PHP_Wrapp3rs}";
+?>
+```
+
+Flag: `FLAG{LFI_W1th_PHP_Wrapp3rs}`
+
+## Takeaway
+
+LFI vulnerabilities let attackers read arbitrary files on the server. The twist here is that PHP files get executed before being served, so you can't just include them directly to see the source. PHP wrappers like `php://filter/convert.base64-encode` bypass execution entirely, turning the file into readable base64 output. The fix is simple: never pass user input directly to `include()` — use a whitelist of allowed pages instead.

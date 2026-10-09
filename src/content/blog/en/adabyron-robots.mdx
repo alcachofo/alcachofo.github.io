@@ -1,0 +1,41 @@
+---
+title: "🤖?"
+description: "The challenge name is a robot emoji with a question mark. The description says \"I am not a robot.\" All of it points to one file: robots.txt."
+date: 2026-02-13T12:19:00.000Z
+tags: ["ctf", "pentesting-web", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 100
+
+## Challenge
+
+> No soy un robot
+
+The challenge name is a robot emoji with a question mark. The description says "I am not a robot." All of it points to one file: `robots.txt`.
+
+## Solution
+
+```bash
+curl https://mecanica.byronlabs.io/robots.txt
+```
+
+```
+User-agent: *
+Disallow: /secret_flag_location
+```
+
+Visit the disallowed path:
+
+```bash
+curl https://mecanica.byronlabs.io/secret_flag_location
+```
+
+Flag: `FLAG{R0b0ts_Txt_Is_N0t_S3cur1ty}`
+
+## Takeaway
+
+`robots.txt` is a public, unauthenticated plaintext file that anyone can read. Its purpose is to politely ask search engine crawlers not to index certain paths — it provides zero access control. Listing a sensitive path in `robots.txt` does the opposite of hiding it: it advertises the path's existence. The flag says it all.

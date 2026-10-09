@@ -1,0 +1,58 @@
+---
+title: "Unknown Artist"
+description: "An unknown artist at Brunnerne has been creating some music. The artist has been using a secret platform to hide a flag. Can you find it?"
+date: 2026-08-23T12:01:00.000Z
+tags: ["ctf", "osint", "brunner"]
+ctf: "BrunnerCTF 2026"
+category: "OSINT"
+---
+
+**CTF:** BrunnerCTF 2026
+**Category:** OSINT
+**Difficulty:** Easy
+**Author:** Ha1fdan
+
+## Challenge
+
+An unknown artist at Brunnerne has been creating some music. The artist has been using a secret platform to hide a flag. Can you find it?
+
+Then you are given an mp3 file called Brunnerne Inc.mp3
+## Solution
+
+### Exif to get the metadata from the mp3
+
+
+```bash
+exiftool "Brunnerne Inc.mp3"
+```
+
+And I find a URL:
+```
+https://suno.com/song/b408fe76-c81f-4a96-b10e-b9df4e5d4ec2
+```
+
+Which leads me to the song. Inside the song I can see  YnJ1bm5lcntmcg== (base64, decoded it and got the first part of the flag)
+
+```
+YnJ1bm5lcntmcg==
+```
+
+```bash
+$ echo 'YnJ1bm5lcntmcg==' | base64 -d
+brunner{fr
+```
+
+Then I went inside the artist and found a few more songs
+
+| Track UUID | Base64 in style field | Decodes to |
+|---|---|---|
+| `b408fe76` (the MP3) | `YnJ1bm5lcntmcg==` | `brunner{fr` |
+| `902d3950` | `MG1fbTM3NGQ0Nw==` | `0m_m374d47` |
+| `7afeac56` | `NF83MF81M2NyMw==` | `4_70_53cr3` |
+| `d5420d3e` | `N181MG45fQ==` | `7_50n9}` |
+
+### Flag
+
+```
+brunner{fr0m_m374d474_70_53cr37_50n9}
+```

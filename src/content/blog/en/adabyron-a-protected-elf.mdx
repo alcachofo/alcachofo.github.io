@@ -1,0 +1,50 @@
+---
+title: "A protected ELF"
+description: "You're given protected — a stripped 64-bit ELF binary that asks for a password."
+date: 2026-02-13T12:07:00.000Z
+tags: ["ctf", "reversing", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Reversing"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Reversing  
+**Difficulty:** 25
+
+## Challenge
+
+You're given `protected` — a stripped 64-bit ELF binary that asks for a password.
+
+## Solution
+
+### Strings recon
+
+Running `strings` reveals six base64-encoded strings and a dynamic flag format (`FLAG{%s}`). Decoding them all:
+
+| Encoded | Decoded |
+|---------|---------|
+| `cjN2M3JzM191YWhfaWZfeTB1X2M0bg==` | `r3v3rs3_uah_if_y0u_c4n` |
+| `bTRzdDNyX2g0azNy` | `m4st3r_h4k3r` |
+| `aGFja190aGVfcGxhbmV0` | `hack_the_planet` |
+| `c3VwM3JfczNjcjN0` | `sup3r_s3cr3t` |
+| `YWRtaW4xMjM0NQ==` | `admin12345` |
+| `cGFzc3dvcmQxMjM=` | `password123` |
+
+Five are decoys. The first one is stored differently — loaded via a global pointer at `0x4010` rather than inline — marking it as the real target.
+
+### Disassembly
+
+Unlike its sibling challenge "Another elf is changing me" which applies a positional cipher before comparing, this binary does no transformation at all. It base64-decodes the stored string and compares it directly against user input with `strcmp`. The password is simply the decoded value.
+
+```
+$ echo 'r3v3rs3_uah_if_y0u_c4n' | ./protected
+Enter password:
+🎉 Congratulations! You've successfully reversed the binary!
+Here's your flag: FLAG{r3v3rs3_uah_if_y0u_c4n}
+```
+
+Flag: `FLAG{r3v3rs3_uah_if_y0u_c4n}`
+
+## Takeaway
+
+The binary's only defense is base64 — an encoding, not encryption. A `strings` + `base64 -d` pipeline cracks it in seconds. The five decoy strings exist to slow down anyone trying them one by one instead of reading the disassembly to identify which one is actually loaded into the comparison. At 25 points, this is a gentle intro to reversing before the positional cipher in "Another elf is changing me" raises the bar.

@@ -1,0 +1,66 @@
+---
+title: "Another elf is changing me"
+description: "You're given anotherelf — a stripped 64-bit ELF binary that asks for a password."
+date: 2026-02-13T12:20:00.000Z
+tags: ["ctf", "reversing", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Reversing"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Reversing  
+**Difficulty:** 150
+
+## Challenge
+
+You're given `anotherelf` — a stripped 64-bit ELF binary that asks for a password.
+
+## Solution
+
+### Strings recon
+
+Running `strings` immediately reveals the flag in plaintext:
+
+```
+Amazing! You've discovered the transformation algorithm!
+Here's your flag: FLAG{AnELFisTouchingMyString}
+```
+
+But the binary won't print it without the correct password. Several base64 strings are also visible — five of them decode to decoy passwords (`hacker_1337`, `find_the_flag`, `crack_the_code`, `reverse_engineer`, `password123456`). None work. The important one is `dGhlRWxmSXNUb3VjaGluZ015U3RyaW5n` which decodes to `theElfIsTouchingMyString` — the comparison target.
+
+### Disassembly
+
+Tracing from `_start` leads to the password-checking function. It does three things: base64-decodes the stored string into `theElfIsTouchingMyString`, applies a custom cipher to your input, then compares the two with `strcmp`.
+
+The cipher is a simple positional transformation:
+
+```asm
+mov    $0x1,%edx          ; i = 1
+.loop:
+mov    %edx,%ecx          ; ecx = i
+add    -0x1(%rbp,%rdx,1),%cl  ; cl = input[i-1] + i
+mov    %cl,-0x1(%rax,%rdx,1)  ; output[i-1] = cl
+add    $0x1,%rdx
+cmp    %rbx,%rcx
+jne    .loop
+```
+
+In pseudocode: `output[i] = input[i] + (i + 1)` for each character.
+
+### Inverting the cipher
+
+Reversing the transformation is straightforward — subtract instead of add:
+
+```python
+target = "theElfIsTouchingMyString"
+password = ''.join(chr(ord(c) - (i + 1)) for i, c in enumerate(target))
+# password = "sfbAg`BkKejW[[_W<g@`]SWO"
+```
+
+Feeding that into the binary prints the flag.
+
+Flag: `FLAG{AnELFisTouchingMyString}`
+
+## Takeaway
+
+Three layers of "defense" — base64-encoded target, positional cipher on input, and five decoy passwords — none of which survive static analysis. The flag was even sitting in the `strings` output from the start. The real challenge is understanding the transformation well enough to invert it. `objdump -d` and patience with x86 assembly is all it takes.

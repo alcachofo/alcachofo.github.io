@@ -1,0 +1,180 @@
+---
+title: "Reto01_TokenService"
+description: "A \"Secure Token Service\" running on 51.49.203.167:20001 that hands out AES-GCM encrypted session tokens."
+date: 2026-08-04T12:00:00.000Z
+tags: ["ctf", "cryptography", "ecsc26"]
+ctf: "ECSC 2026 Spanish Qualifier (INCIBE)"
+category: "Cryptography"
+---
+
+**CTF:** ECSC 2026 Spanish Qualifier (INCIBE)  
+**Category:** Cryptography  
+**Difficulty:** 500  
+
+## Challenge
+
+A "Secure Token Service" running on `51.49.203.167:20001` that hands out AES-GCM encrypted session tokens. The download is a single file, `token_service.py`, and it ships only the crypto core: the Flask app wrapped around it is not included. To get the flag you have to present a token that decrypts to `user=<target>` for a username the server picks.
+
+```python
+KEY = os.urandom(16)
+
+def generate_token(counter, username):
+    nonce = counter.to_bytes(12, byteorder="big")
+    plaintext = f"user={username}".encode().ljust(16, b"\x00")
+    cipher = AES.new(KEY, AES.MODE_GCM, nonce=nonce)
+    ciphertext, tag = cipher.encrypt_and_digest(plaintext)
+    return {
+        "ciphertext": ciphertext.hex(),
+        "tag": tag.hex(),
+        "nonce": nonce.hex()
+    }
+
+def verify_token(ciphertext_hex, tag_hex, nonce_hex, target_username):
+    ...
+    cipher = AES.new(KEY, AES.MODE_GCM, nonce=nonce)
+    decrypted = cipher.decrypt_and_verify(ciphertext, tag)
+    expected_prefix = f"user={target_username}".encode()
+    if decrypted.startswith(expected_prefix):
+        padding = decrypted[len(expected_prefix):]
+        return all(b == 0 for b in padding)
+    return False
+```
+
+## Solution
+
+### The bug is two lines apart
+
+`KEY = os.urandom(16)` sits at module level. One key for the entire service, not one per session. And the nonce is `counter.to_bytes(12, 'big')`, where the counter is a *per-session* counter that starts at zero.
+
+So the first token of every session I open is encrypted under the same key with nonce `000000000000000000000000`. That is nonce reuse in GCM, and GCM is the mode where reuse costs you far more than confidentiality. It leaks the authentication subkey `H`, which means I can forge tags for arbitrary ciphertexts. This is Joux's forbidden attack.
+
+Before touching any math I read the service's own index page at `/`, which documents every endpoint and its JSON schema. That saved a directory brute force and gave me the four calls I needed: `/register`, `/token?session_id=`, `/flag_challenge?session_id=` and a POST to `/flag`.
+
+I registered four sessions and pulled only the *first* token of each:
+
+```python
+for _ in range(4):
+    st, reg = jreq("/register", {})
+    sid, user = reg["session_id"], reg["username"]
+    st, tok = jreq(f"/token?session_id={sid}")
+    tokens.append({
+        "sid": sid, "user": user, "nonce": tok["nonce"],
+        "ct": bytes.fromhex(tok["ciphertext"]), "tag": bytes.fromhex(tok["tag"]),
+    })
+```
+
+All four came back on nonce `000000000000000000000000` with *different* ciphertexts, because `/register` assigns each session a random `guest_xxxx` username. Different plaintexts under one nonce is exactly the condition the attack needs. If every session had been handed the same username, the ciphertexts would have been identical and there would have been nothing to cancel. The script checks for that case explicitly rather than silently dividing by zero.
+
+Sizing is convenient: `user=guest_xxxx` is 15 bytes, so `ljust(16, b"\x00")` gives exactly **one** 128-bit ciphertext block and no AAD.
+
+### Recovering H and E_K(J0)
+
+For a single ciphertext block with no associated data, the GCM tag is
+
+```text
+T = C1·H² ⊕ L·H ⊕ E_K(J0)
+```
+
+with all products in GF(2¹²⁸) under the GCM bit convention, and `L = len(AAD)₆₄ ‖ len(C)₆₄ = 0x00…00 ‖ 0x00…80`. Both `L·H` and `E_K(J0)` are constant for a fixed nonce, so XORing two tags collected at that nonce kills them:
+
+```text
+T1 ⊕ T2 = (C1 ⊕ C2)·H²      →      H² = (T1 ⊕ T2) / (C1 ⊕ C2)
+```
+
+The textbook forbidden attack ends in factoring a polynomial over GF(2¹²⁸) and picking between several candidate roots. Here the message is one block, so the polynomial has a single unknown term and the recovery is a straight field division (one candidate, no root-finding). Squaring is the Frobenius map and a bijection on GF(2¹²⁸), so the square root is unique and cheap: `H = (H²)^(2¹²⁷)`. With `H` in hand, the per-nonce constant falls out of either tag:
+
+```text
+E_K(J0) = T1 ⊕ C1·H² ⊕ L·H
+```
+
+The whole field layer is about thirty lines, straight from NIST SP 800-38D Algorithm 1:
+
+```python
+R = 0xE1 << 120
+
+def gmul(x, y):
+    z, v = 0, y
+    for i in range(128):
+        if (x >> (127 - i)) & 1:
+            z ^= v
+        v = (v >> 1) ^ R if v & 1 else v >> 1
+    return z
+
+def gpow(x, e):
+    r, b = 1 << 127, x   # 1 << 127 is the multiplicative identity here
+    while e:
+        if e & 1:
+            r = gmul(r, b)
+        b = gmul(b, b)
+        e >>= 1
+    return r
+
+ginv  = lambda x: gpow(x, (1 << 128) - 2)
+gsqrt = lambda x: gpow(x, 1 << 127)
+```
+
+and then
+
+```python
+L = b2i(b"\x00" * 8 + (128).to_bytes(8, "big"))
+H2 = gmul(T1 ^ T2, ginv(C1 ^ C2))
+H  = gsqrt(H2)
+assert gmul(H, H) == H2
+EJ = T1 ^ gmul(C1, H2) ^ gmul(L, H)
+
+def forge_tag(ct_int):
+    return gmul(ct_int, H2) ^ gmul(L, H) ^ EJ
+```
+
+### Forging inside a five second window
+
+`/flag_challenge` is what names the target username, and it only gives you five seconds to answer. That shapes the whole script: every expensive step has to happen *before* that call, and the request to `/flag_challenge` has to be the second-to-last thing I do.
+
+It also meant I did not want to gamble the window on untested algebra. I collected four tokens but only used two to derive `H`, so the other two are free oracle output the model has never seen. The script predicts their tags and refuses to continue on a mismatch:
+
+```python
+for t in group:
+    if t is t1 or t is t2:
+        continue
+    predicted = i2b(forge_tag(b2i(t["ct"])))
+    if predicted != t["tag"]:
+        sys.exit("[!] model wrong - do not burn the 5s window")
+```
+
+Both matched, which confirms `H` and `E_K(J0)` before a single second of the window is spent.
+
+The ciphertext itself is easier than the tag. GCM encrypts with CTR, so a keystream block recovered once is reusable for anything at the same nonce, and I know the plaintext of my own token exactly:
+
+```python
+ks = bytes(a ^ b for a, b in zip(t1["ct"], pt_for(t1["user"])))
+```
+
+After that the forgery is XOR and one field multiply. Ask for the challenge, build `user=<target>` padded to 16 bytes, encrypt it with the keystream, tag it with `forge_tag`, and post it back on nonce zero:
+
+```python
+st, chal = jreq(f"/flag_challenge?session_id={sid}")
+target = chal["target_username"]
+
+forged_pt  = pt_for(target)
+forged_ct  = bytes(a ^ b for a, b in zip(forged_pt, ks))
+forged_tag = i2b(forge_tag(b2i(forged_ct)))
+
+st, res = jreq("/flag", {
+    "session_id": sid,
+    "ciphertext": forged_ct.hex(),
+    "tag": forged_tag.hex(),
+    "nonce": nonce,
+})
+```
+
+`decrypt_and_verify` accepted it. The token that went in as `user=guest_xxxx` came back out as `user=admin_xxxx`, tag and all, and the server printed the flag well inside the window.
+
+Flag: `flag{ECSC2026_aes_gcm_forbidden_attack_nonce_reuse_token_forgery}`
+
+## Takeaway
+
+GCM does not degrade gracefully. Reuse a nonce in CTR mode and you lose confidentiality for those two messages; reuse a nonce in GCM and you additionally hand over `H`, the GHASH subkey, which is *not* per-message: it is `E_K(0¹²⁸)`, derived from the key alone. Once an attacker has `H` and the per-nonce constant `E_K(J0)`, they can produce a valid tag for any ciphertext at that nonce forever. The forgery here is a two-message attack, and the message was one block long, which is why it collapses to a division instead of a polynomial factorization.
+
+What actually went wrong is a design decision that looks harmless in isolation: making the counter a property of the *session* while the key is a property of the *process*. A GCM nonce only has to be unique within the scope of its key, and the moment those two scopes disagree the guarantee is gone. The service would have been fine either way (a fresh key per session, or a single counter shared globally across all sessions), but it mixed them.
+
+The correct implementation is to stop hand-rolling the nonce. Use a 96-bit random nonce from a CSPRNG and rotate the key long before the birthday bound, or use a misuse-resistant mode like AES-GCM-SIV where a repeated nonce leaks only that two plaintexts were equal. And for this use case specifically, an encrypted blob was never the right primitive: a session token that carries a username should be a signed or MAC'd structure the server does not have to decrypt to trust, with the identity looked up server-side from a session id rather than read out of something the client is holding.

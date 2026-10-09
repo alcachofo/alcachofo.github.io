@@ -1,0 +1,181 @@
+---
+title: "Reto11_SecureLockbox"
+description: "The zip held a single file, firmware.bin, 956 bytes. No ELF header, no symbols, no linker script."
+date: 2026-08-04T12:08:00.000Z
+tags: ["ctf", "reversing", "ecsc26"]
+ctf: "ECSC 2026 Spanish Qualifier (INCIBE)"
+category: "Reversing"
+---
+
+**CTF:** ECSC 2026 Spanish Qualifier (INCIBE)  
+**Category:** Reversing  
+**Difficulty:** 900  
+
+## Challenge
+
+The zip held a single file, `firmware.bin`, 956 bytes. No ELF header, no symbols, no linker script. It is a raw image for an ARM Cortex-M4 that asks for a serial key over a UART and prints the flag if the key is accepted.
+
+## Solution
+
+### Getting a disassembly out of a headerless blob
+
+`file` says "data" and that is the end of the automated help. The only structure a raw Cortex-M image is guaranteed to have is the vector table at offset 0:
+
+```text
+00 00 01 20  09 00 00 00  02 48 85 46  00 f0 0c f9
+```
+
+Two little-endian words. Initial stack pointer `0x20010000`, reset vector `0x00000009`. The low bit is the Thumb bit, not part of the address, so the reset handler really starts at `0x08`. That single number is what Ghidra is missing.
+
+Importing the file and pressing analyze does nothing useful, because with no entry point the analyzer has no flow to follow and everything stays as undefined bytes. So I loaded it as `ARM:LE:32:Cortex` with analysis disabled, disassembled at `0x08` myself, declared a function there, and only then ran `analyzeAll`:
+
+```python
+with pyghidra.open_program(str(BIN), language="ARM:LE:32:Cortex",
+                           compiler="default", analyze=False) as flat:
+    prog = flat.getCurrentProgram()
+    addr = flat.toAddr(entry)          # reset & ~1  ->  0x08
+    flat.disassemble(addr)
+    flat.createFunction(addr, "reset_handler")
+    flat.analyzeAll(prog)
+```
+
+Six functions came out of that. Ghidra labeled one of them `UsageFault`, purely because it starts at `0x18` and that is where the usage fault handler sits in a normal vector table. It is not a fault handler. It is the key checker.
+
+The strings back up the shape of the program:
+
+```text
+0x309  --- ARM Cortex-M4 Secure Lockbox ---
+0x330  Enter Serial Key:
+0x344  Access Granted!
+0x358  Flag:
+0x360  Halting system.
+0x374  Access Denied! Invalid Key.
+```
+
+All I/O is MMIO at `0x4000c000`. Every read and write spins on `puVar1[6]`, which is base + 0x18, the PL011 flag register. `<< 0x1a` tests bit 5 (TXFF, transmit FIFO full) and `<< 0x1b` tests bit 4 (RXFE, receive FIFO empty). Plain polled PL011, no interrupts, no OS, nothing underneath. The main loop also gates on `iVar6 == 0x10`, so the key is exactly 16 bytes.
+
+### The check is an ARX permutation, and those invert
+
+The checker packs the 16 input bytes into four little-endian u32 and runs 8 rounds:
+
+```c
+iVar7 = 8;
+do {
+  puVar5 = local_30;
+  while (puVar5 = puVar5 + 1, local_30 + 4 != puVar5) {
+    *puVar5 = DAT_000000cc + ((*puVar5 ^ DAT_000000c8) >> 0x19 | (*puVar5 ^ DAT_000000c8) << 7);
+  }
+  local_30[0] = DAT_000000cc +
+                ((local_30[0] ^ DAT_000000c8) >> 0x19 | (local_30[0] ^ DAT_000000c8) << 7) +
+                local_30[1];
+  iVar7 = iVar7 + -1;
+  local_30[1] = local_30[1] ^ local_30[2];
+  local_30[2] = local_30[2] + local_30[3];
+  local_30[3] = local_30[3] ^ local_30[0];
+} while (iVar7 != 0);
+```
+
+`x >> 0x19 | x << 7` is a 32-bit rotate left by 7. So the same transform is applied to all four words:
+
+```text
+T(x) = C2 + rotl32(x ^ C1, 7)
+```
+
+and then the words are mixed. Writing `a_i = T(v_i)`, one round is:
+
+```text
+v0 = a0 + a1
+v1 = a1 ^ a2
+v2 = a2 + a3
+v3 = a3 ^ v0      <- the NEW v0
+```
+
+That last line is the only part with a real ordering trap. `local_30[3] = local_30[3] ^ local_30[0]` runs after `local_30[0]` has already been overwritten, so it uses the post-round value, not `a0`.
+
+The constants are all sitting in the literal pools:
+
+| Offset | Value | Role |
+|---|---|---|
+| `0xc8` | `0x55aa55aa` | C1, the XOR constant |
+| `0xcc` | `0x1337c0de` | C2, the additive constant |
+| `0xd0` | `0x000002f4` | pointer to the stored 4-word target |
+| `0x21c` | `0x811c9dc5` | FNV-1a offset basis |
+| `0x220` | `0x01000193` | FNV-1a prime |
+| `0x224` | `0x41c64e6d` | LCG multiplier |
+| `0x2e0` | `0x00000394` | pointer to the 36-byte flag blob |
+
+The target at `0x2f4` is:
+
+```text
+7c 82 87 70  38 dd a0 5d  43 21 86 ed  13 ea b8 e7
+```
+
+There is no key schedule, no S-box, no round constant that varies, and nothing that loses information. Add, rotate and xor on 32-bit words are all bijections, so the whole 8-round network is a permutation of the 128-bit state. That means the stored target is not a hash of the key. It *is* the key, run through an invertible function. Undoing it takes the same amount of work as checking it once.
+
+Peel the round in the reverse order, taking care that `v0` is already the new value when you recover `a3`:
+
+```python
+def Tinv(y):
+    return rotr((y - C2) & M, 7) ^ C1
+
+def unrounds(v, n=8):
+    v = list(v)
+    for _ in range(n):
+        a3 = v[3] ^ v[0]
+        a2 = (v[2] - a3) & M
+        a1 = v[1] ^ a2
+        a0 = (v[0] - a1) & M
+        v = [Tinv(a0), Tinv(a1), Tinv(a2), Tinv(a3)]
+    return v
+```
+
+Eight reverse rounds on the target give `0x5f4d5241 0x4d5f344d 0x5f4f494d 0x62613938`, which repacked little-endian is:
+
+```text
+41 52 4d 5f 4d 34 5f 4d 4d 49 4f 5f 38 39 61 62   ARM_M4_MMIO_89ab
+```
+
+Sixteen bytes, every one printable ASCII, which is a strong sign the inversion is right and not just arithmetically consistent. I ran the forward rounds on the recovered state anyway and it reproduced the target exactly.
+
+### Deriving the flag from the key
+
+The firmware does not store the flag in the clear. On success it copies a 36-byte blob from `0x394` onto the stack and calls the function at `0x1e0` with the key and an output buffer:
+
+```c
+uVar4 = DAT_0000021c;                      // 0x811c9dc5
+do {
+  pbVar5 = pbVar5 + 1;
+  uVar4 = DAT_00000220 * (*pbVar5 ^ uVar4);  // 0x01000193
+} while (pbVar5 != (byte *)(param_1 + 0xf));
+...
+uVar4 = iVar1 * uVar4 + 0x3039;            // 0x41c64e6d, +12345
+*puVar3 = (char)(uVar4 >> 0x10);
+```
+
+That is FNV-1a over the 16 key bytes to produce a seed, then the classic ANSI C linear congruential generator on top of it, emitting `(state >> 16) & 0xff` per byte. Nothing was renamed in the binary, but `0x811c9dc5` / `0x01000193` and `0x41c64e6d` / `12345` are recognizable on sight, and that recognition is what confirms the algorithm rather than guessing at the shift widths.
+
+The keystream is XORed against the blob in the print loop. Ghidra had constant-folded the first blob byte into that loop as `uVar7 = 0xbf`, and the byte at `0x394` in the file is `bf`, which was the confirmation that the blob pointer was the right one:
+
+```text
+bf 7e 8d 5e 56 f9 96 3b 76 b1 fb 53 cd 06 c7 8c e7 76
+56 0d 4a f1 0b 37 82 09 81 18 6e bb e2 9e f6 ee 87 82
+```
+
+Thirty six bytes of keystream, one XOR, done:
+
+```text
+KEY : ARM_M4_MMIO_89ab
+FLAG: flag{ECSC2026_arm_m4_baremetal_91c2}
+```
+
+Flag: `flag{ECSC2026_arm_m4_baremetal_91c2}`
+
+## Takeaway
+
+Two separate lessons here, one about the tooling and one about the crypto.
+
+The tooling one is that a raw firmware image is not hard to analyze, it just refuses to bootstrap itself. Ghidra needs one address to start from, and on Cortex-M that address is always in the first eight bytes of the file. Clear the Thumb bit, disassemble there, then analyze. Skipping that step is why raw blobs feel impenetrable when they are not.
+
+The crypto one is the actual vulnerability. This is a serial check built as a pure ARX permutation: add, rotate, xor, no S-box, no key schedule, no compression. Every operation is reversible, so the transform has no one-way property at all and storing the expected output is exactly as safe as storing the serial in plaintext. Rounds do not fix that. Eight rounds of a bijection is still a bijection.
+
+The correct implementation does not compare a transformed serial in the first place. If a device must validate a license offline, the right shape is asymmetric: the vendor signs the serial (or a device-bound token) with a private key that never leaves their infrastructure, and the firmware carries only the public key to verify it. Extracting the whole flash then gives an attacker the ability to verify keys, not to mint them. If a comparison against a stored value really is unavoidable, it has to go through a salted, deliberately slow KDF, so the stored value is a preimage problem instead of an algebra problem. Deriving the flag's encryption key from the serial was a good instinct, but it buys nothing once the serial itself is recoverable from the same image.

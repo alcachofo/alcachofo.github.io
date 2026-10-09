@@ -1,0 +1,39 @@
+---
+title: "delicioso"
+description: "The website greets you with a simple message: \"Welcome Guest! Only admins can see the flag.\""
+date: 2026-02-13T12:00:00.000Z
+tags: ["ctf", "pentesting-web", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 10  
+
+## Challenge
+
+The website greets you with a simple message:
+
+> Welcome Guest!
+> Only admins can see the flag.
+
+## Solution
+
+The hint is right there — "Guest" and "admins". The first thing I did was open Burp Suite to intercept the request and inspect what was being sent. Immediately I spotted a cookie in the request:
+
+```
+Cookie: role=guest
+```
+
+Since it was pretty straight forward, my first thought was changing it to:
+
+```
+Cookie: role=admin
+```
+
+Forwarded the request, and the flag appeared.
+
+## Takeaway
+
+This is a classic example of broken access control through client-side trust. The server blindly trusts a cookie value set by the client to determine authorization. In a real application, roles should be validated server-side, typically tied to an authenticated session — never stored as a modifiable cookie.

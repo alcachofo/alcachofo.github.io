@@ -1,0 +1,45 @@
+---
+title: "yo uso internet explorer"
+description: "You're given capture.pcap. The challenge name and description point to unencrypted HTTP traffic on a legacy browser."
+date: 2026-02-13T12:28:00.000Z
+tags: ["ctf", "forensics", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Forensics"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Forensics  
+**Difficulty:** 350
+
+## Challenge
+
+> para navegar por el puerto 80
+
+You're given `capture.pcap`. The challenge name and description point to unencrypted HTTP traffic on a legacy browser.
+
+## Solution
+
+### Reading the PCAP
+
+The capture contains 62 packets — all TCP between `192.168.1.15` (client) and `192.168.1.100:8080` (server). Most of it is noise: matchmaking pings, telemetry posts with FPS data, ad banner requests, CDN image fetches. Typical gaming-app filler designed to make you scroll past the important part.
+
+### Finding the flag
+
+Packet #41 breaks the pattern. Instead of a `GET` to a game API, it's a `POST` to a legacy login endpoint:
+
+```
+POST /legacy/login HTTP/1.1
+Content-Type: application/x-www-form-urlencoded
+
+user=admin_gamer&pass=FLAG{Cyb3rGam3r2026_P4ssw0rd!}
+```
+
+The server responds with `Login successful`. The flag is sitting right there in the password field, transmitted in plaintext over HTTP.
+
+The clues map directly to the solution: "Internet Explorer" → the `/legacy/login` endpoint, "port 80" → unencrypted HTTP where credentials are visible in the clear.
+
+Flag: `FLAG{Cyb3rGam3r2026_P4ssw0rd!}`
+
+## Takeaway
+
+Any credentials sent over plain HTTP are fully readable to anyone with a packet capture. Filtering for `POST` requests or searching for keywords like `pass`, `login`, or `flag` in packet payloads cuts through the noise immediately. This is exactly why HTTPS exists — and why legacy login flows over port 80 are a textbook security risk.

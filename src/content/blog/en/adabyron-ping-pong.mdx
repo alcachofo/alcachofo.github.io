@@ -1,0 +1,56 @@
+---
+title: "ping pong"
+description: "A web-based \"Network Diagnostics\" tool that takes an IP address and runs ping against it. Classic OS command injection setup."
+date: 2026-02-13T12:17:00.000Z
+tags: ["ctf", "pentesting-web", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 100
+
+## Challenge
+
+A web-based "Network Diagnostics" tool that takes an IP address and runs `ping` against it. Classic OS command injection setup.
+
+## Solution
+
+### Testing for injection
+
+The server likely executes something like `ping -c 1 <user_input>`. Trying basic injection with spaces (`8.8.8.8 | id`) returns an error: "Invalid input. Whitespaces and blocked words are not allowed."
+
+So there's filtering on spaces and certain keywords, but what about command separators?
+
+### Bypassing the filter
+
+Using `;` with no spaces chains commands successfully:
+
+```
+8.8.8.8;id
+```
+
+Output confirms code execution as `uid=1000(ctfplayer)`. Since spaces are blocked, `${IFS}` (Internal Field Separator) works as a substitute:
+
+```
+8.8.8.8;ls${IFS}/
+```
+
+### Finding and reading the flag
+
+```
+8.8.8.8;find${IFS}/${IFS}-name${IFS}*flag*
+```
+
+Returns `/app/.hidden_flag.txt` and `/tmp/.hidden_flag.txt`. Reading it with `head` (in case `cat` is blocked):
+
+```
+8.8.8.8;head${IFS}/app/.hidden_flag.txt
+```
+
+Flag captured.
+
+## Takeaway
+
+The input filter blocked spaces and certain keywords but failed to sanitize the `;` command separator — that's all an attacker needs. `${IFS}` as a space substitute and alternative commands like `head` instead of `cat` bypass the remaining restrictions. Proper mitigation means never passing user input directly to a shell; use parameterized system calls or a strict allowlist of valid IP address characters.

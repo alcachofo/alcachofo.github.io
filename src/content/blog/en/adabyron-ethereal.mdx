@@ -1,0 +1,55 @@
+---
+title: "Ethereal"
+description: "The name \"Ethereal\" is the original name of Wireshark. You're given capture__1_.pcap."
+date: 2026-02-13T12:22:00.000Z
+tags: ["ctf", "forensics", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Forensics"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Forensics  
+**Difficulty:** 150
+
+## Challenge
+
+The name "Ethereal" is the original name of Wireshark. You're given `capture__1_.pcap`.
+
+## Solution
+
+### Analyzing the PCAP
+
+The capture contains 88 packets — all DNS traffic (UDP port 53) from `192.168.1.100` querying three public resolvers (`8.8.8.8`, `1.1.1.1`, `208.67.222.222`). Most of it looks like routine browsing: lookups for google.com, reddit.com, youtube.com, etc.
+
+### Spotting the exfiltration
+
+Six queries break the pattern. Instead of resolving real domains, they query subdomains under `exfil-data.suspicious.local` with base64-encoded labels:
+
+| Packet | Query |
+|--------|-------|
+| #31 | `RkxBR3tE.exfil-data.suspicious.local` |
+| #33 | `TlNfYzB2.exfil-data.suspicious.local` |
+| #37 | `M3J0X2No.exfil-data.suspicious.local` |
+| #43 | `NG5uM2xf.exfil-data.suspicious.local` |
+| #45 | `ZDFzYzB2.exfil-data.suspicious.local` |
+| #47 | `M3IzZH0.exfil-data.suspicious.local` |
+
+All six are spaced apart and interleaved with legitimate DNS traffic to blend in. Every response returns `127.0.0.1` — the server is complicit, a hallmark of DNS tunneling.
+
+### Extracting the flag
+
+Concatenating the base64 labels in order and decoding:
+
+```
+RkxBR3tETlNfYzB2M3J0X2NoNG5uM2xfZDFzYzB2M3IzZH0=
+```
+
+```bash
+echo "RkxBR3tETlNfYzB2M3J0X2NoNG5uM2xfZDFzYzB2M3IzZH0=" | base64 -d
+```
+
+Flag: `FLAG{DNS_c0v3rt_ch4nn3l_d1sc0v3r3d}`
+
+## Takeaway
+
+DNS exfiltration is a real-world technique used by malware and APT groups. Because DNS is almost always allowed through firewalls and rarely inspected, attackers encode stolen data into subdomain labels and send it as ordinary-looking queries to a server they control. The red flags here are base64-looking subdomain labels, queries to an unusual domain (`suspicious.local`), and all responses pointing to `127.0.0.1`.

@@ -1,0 +1,32 @@
+---
+title: "🤨"
+description: "We're given an image and told something's off about it."
+date: 2026-02-13T12:06:00.000Z
+tags: ["ctf", "forensics", "adabyron"]
+ctf: "Cátedra Ada Byron UAH (INCIBE)"
+category: "Forensics"
+---
+
+**CTF:** Cátedra Ada Byron UAH (INCIBE)  
+**Category:** Forensics  
+**Difficulty:** 20
+
+## Challenge
+
+> ¿soy yo, o está rara la 📸?
+
+We're given an image and told something's off about it.
+
+## Solution
+
+"Rara la foto" — the description is pointing straight at the image metadata. Ran `exiftool` on the image and checked the EXIF data. Under the "User Comment" field:
+
+```
+FLAG{Ex1f_D4t4_H1d3s_S3cr3ts}
+```
+
+Flag: `FLAG{Ex1f_D4t4_H1d3s_S3cr3ts}`
+
+## Takeaway
+
+EXIF data is the first thing to check in any forensics challenge involving images. Tools like `exiftool`, `strings`, or even right-clicking "Properties" on the file can reveal hidden data in metadata fields like comments, author, GPS coordinates, or custom tags. In real life, this is also a privacy concern — photos taken with phones often contain location data and device info that people unknowingly share.
