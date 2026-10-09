@@ -8,7 +8,7 @@ import { use } from 'react'
 import { FilteredPosts } from '@/components/filtered-posts'
 import { JsonLd } from '@/components/json-ld'
 import { PageHeader } from '@/components/page-header'
-import { getLatestPosts, getSite } from '@/lib/content'
+import { getLatestPosts, getSite, toPostSummary } from '@/lib/content'
 import { createJsonLdCollectionPage } from '@/lib/json-ld'
 import { createPageMetadata } from '@/lib/metadata'
 import { getLocalizedPath } from '@/utils/get-localized-path'
@@ -65,7 +65,8 @@ function Page(props: PageProps<'/[locale]/blog'>) {
     <>
       <JsonLd json={jsonLd} />
       <PageHeader title={title} description={description} />
-      <FilteredPosts posts={posts} />
+      {/* Each post is cut down to its card fields before it is handed to the client-side search list. */}
+      <FilteredPosts posts={posts.map(toPostSummary)} />
     </>
   )
 }

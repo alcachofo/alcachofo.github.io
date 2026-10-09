@@ -1,6 +1,7 @@
 'use client'
 
-import type { Post } from 'content-collections'
+// Same slim card shape as the blog index uses.
+import type { PostSummary } from '@/lib/content'
 
 import { motion, useInView } from 'motion/react'
 import { useTranslations } from 'next-intl'
@@ -18,7 +19,7 @@ const variants = {
 }
 
 type LatestArticlesProps = {
-  posts: Post[]
+  posts: PostSummary[]
 }
 
 export function LatestArticles(props: LatestArticlesProps) {

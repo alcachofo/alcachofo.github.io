@@ -1,5 +1,6 @@
 import 'server-only'
 
+import type { Post } from 'content-collections'
 import type { Locale } from 'next-intl'
 
 import { allPosts, allProjects, allSites } from 'content-collections'
@@ -44,6 +45,15 @@ export function getSite(slug: string, locale?: string) {
   }
 
   return allSites.find((p) => p.slug === slug)
+}
+
+// A post card only shows these four fields. Client components get this slim shape instead of whole posts,
+// because a whole post also carries its raw and compiled MDX, which made the blog index 1.3 MB of HTML.
+export type PostSummary = Pick<Post, 'slug' | 'title' | 'description' | 'date'>
+
+// Cuts a post down to its card fields, so only those get serialised into the page for the browser.
+export function toPostSummary(post: Post): PostSummary {
+  return { slug: post.slug, title: post.title, description: post.description, date: post.date }
 }
 
 export function getLatestPosts(locale: string, limit: number = allPosts.length) {

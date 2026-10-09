@@ -10,7 +10,7 @@ import { Hero } from '@/components/home/hero'
 import { LatestArticles } from '@/components/home/latest-articles'
 import { SelectedProjects } from '@/components/home/selected-projects'
 import { JsonLd } from '@/components/json-ld'
-import { getLatestPosts, getSelectedProjects } from '@/lib/content'
+import { getLatestPosts, getSelectedProjects, toPostSummary } from '@/lib/content'
 import { createJsonLdWebSite } from '@/lib/json-ld'
 import { createPageMetadata } from '@/lib/metadata'
 import { getLocalizedPath } from '@/utils/get-localized-path'
@@ -55,7 +55,8 @@ function Page(props: PageProps<'/[locale]'>) {
       <Hero />
       <SelectedProjects projects={filteredProjects} />
       <AboutMe />
-      <LatestArticles posts={filteredPosts} />
+      {/* The two latest posts, cut down to their card fields like on the blog index. */}
+      <LatestArticles posts={filteredPosts.map(toPostSummary)} />
     </>
   )
 }

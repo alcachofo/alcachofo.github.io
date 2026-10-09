@@ -1,6 +1,7 @@
 'use client'
 
-import type { Post } from 'content-collections'
+// A type-only import, so the server-only content module never reaches the browser bundle.
+import type { PostSummary } from '@/lib/content'
 
 import { PencilIcon } from 'lucide-react'
 import { useTranslations } from 'next-intl'
@@ -10,7 +11,7 @@ import { useFormattedDate } from '@/hooks/use-formatted-date'
 import { ContentCard } from './content-card'
 
 type PostCardProps = {
-  post: Post
+  post: PostSummary
   featured?: boolean
 }
 

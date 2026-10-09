@@ -1,6 +1,7 @@
 'use client'
 
-import type { Post } from 'content-collections'
+// Only the card fields come in, which keeps the blog index page small.
+import type { PostSummary } from '@/lib/content'
 
 import { SearchIcon } from 'lucide-react'
 import { useTranslations } from 'next-intl'
@@ -10,7 +11,7 @@ import { PostCard } from './post-card'
 import { InputGroup, InputGroupAddon, InputGroupInput } from './ui/input-group'
 
 type FilteredPostsProps = {
-  posts: Post[]
+  posts: PostSummary[]
 }
 
 export function FilteredPosts(props: FilteredPostsProps) {
